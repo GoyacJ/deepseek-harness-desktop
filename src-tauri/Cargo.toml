@@ -1,6 +1,6 @@
 [package]
 name = "deepseek-harness-desktop"
-version = "0.1.1"
+version = "0.1.2"
 description = "Tauri desktop shell for the official DeepSeek Harness npm distribution"
 authors = ["Goya"]
 edition = "2024"
