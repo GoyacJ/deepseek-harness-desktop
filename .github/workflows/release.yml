@@ -84,7 +84,7 @@ jobs:
 
             macOS 安装包未做 Apple Developer ID 签名。Windows 安装包未做代码签名。
           releaseDraft: false
-          prerelease: true
+          prerelease: false
           generateReleaseNotes: true
           uploadWorkflowArtifacts: true
           retryAttempts: 1
