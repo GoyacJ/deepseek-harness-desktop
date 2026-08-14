@@ -20,6 +20,10 @@ use tauri::{AppHandle, Manager, Url, WebviewWindow};
 const OFFICIAL_DSH_PACKAGE: &str = "@deepseek-ai/dsh@0.1.0-rc.6";
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 300;
 const MAX_LOG_LINES: usize = 180;
+const BUNDLED_BOOTSTRAP_EVAL: &str = concat!(
+    "const { pathToFileURL } = await import('node:url');",
+    "await import(pathToFileURL(process.env.DSH_DESKTOP_BOOTSTRAP).href);",
+);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -168,6 +172,7 @@ enum SupervisorCommand {
 struct Launcher {
     program: PathBuf,
     prefix_args: Vec<OsString>,
+    environment: Vec<(OsString, OsString)>,
     description: String,
     uses_npx: bool,
 }
@@ -231,6 +236,12 @@ impl RuntimeConfig {
         }
         command.args(&self.launcher.prefix_args);
         command.args(dsh_arguments(self.patch.as_deref(), port));
+        command.envs(
+            self.launcher
+                .environment
+                .iter()
+                .map(|(key, value)| (key, value)),
+        );
         if !self.launcher.uses_npx
             && let Some(path) = bundled_path_env(&self.launcher.program)
         {
@@ -312,12 +323,7 @@ fn resolve_launcher(resource_dir: &Path, package_spec: &str) -> Launcher {
         let bundled_entry = bundled_root.join("app/node_modules/@deepseek-ai/dsh/lib/bin.js");
 
         if bundled_node.is_file() && bundled_entry.is_file() && bootstrap.is_file() {
-            return Launcher {
-                program: bundled_node,
-                prefix_args: vec![bootstrap.into_os_string(), bundled_entry.into_os_string()],
-                description: description.into(),
-                uses_npx: false,
-            };
+            return bundled_launcher(bundled_node, bootstrap, bundled_entry, description);
         }
     }
 
@@ -327,8 +333,34 @@ fn resolve_launcher(resource_dir: &Path, package_spec: &str) -> Launcher {
     Launcher {
         program: npx,
         prefix_args: vec![OsString::from("--yes"), OsString::from(package_spec)],
+        environment: Vec::new(),
         description: "系统 npx + 固定官方 DSH 版本".into(),
         uses_npx: true,
+    }
+}
+
+fn bundled_launcher(
+    program: PathBuf,
+    bootstrap: PathBuf,
+    entry: PathBuf,
+    description: &str,
+) -> Launcher {
+    Launcher {
+        program,
+        prefix_args: vec![
+            OsString::from("--input-type=module"),
+            OsString::from("--eval"),
+            OsString::from(BUNDLED_BOOTSTRAP_EVAL),
+        ],
+        environment: vec![
+            (
+                OsString::from("DSH_DESKTOP_BOOTSTRAP"),
+                bootstrap.into_os_string(),
+            ),
+            (OsString::from("DSH_DESKTOP_ENTRY"), entry.into_os_string()),
+        ],
+        description: description.into(),
+        uses_npx: false,
     }
 }
 
@@ -882,6 +914,31 @@ mod tests {
         let value = bundled_path_env(program).unwrap();
         let first = env::split_paths(&value).next().unwrap();
         assert_eq!(first, program.parent().unwrap());
+    }
+
+    #[test]
+    fn bundled_runtime_paths_are_passed_outside_the_windows_command_line() {
+        let bootstrap = PathBuf::from(r"D:\Apps With Spaces\resources\runtime-bootstrap.mjs");
+        let entry = PathBuf::from(
+            r"D:\Apps With Spaces\resources\dsh-runtime\app\node_modules\@deepseek-ai\dsh\lib\bin.js",
+        );
+        let launcher = bundled_launcher(
+            PathBuf::from(r"D:\Apps With Spaces\resources\dsh-runtime\node\node.exe"),
+            bootstrap.clone(),
+            entry.clone(),
+            "test runtime",
+        );
+
+        assert_eq!(
+            launcher.prefix_args,
+            [
+                OsString::from("--input-type=module"),
+                OsString::from("--eval"),
+                OsString::from(BUNDLED_BOOTSTRAP_EVAL),
+            ]
+        );
+        assert_eq!(launcher.environment[0].1, bootstrap.as_os_str());
+        assert_eq!(launcher.environment[1].1, entry.as_os_str());
     }
 
     #[cfg(debug_assertions)]

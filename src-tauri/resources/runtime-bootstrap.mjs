@@ -1,8 +1,9 @@
 import { pathToFileURL } from 'node:url'
 
-const [entry, ...argumentsForDsh] = process.argv.slice(2)
+const entry = process.env.DSH_DESKTOP_ENTRY
+const argumentsForDsh = process.argv.slice(1)
 if (!entry) {
-  throw new Error('desktop runtime bootstrap requires the official DSH entry path')
+  throw new Error('DSH_DESKTOP_ENTRY is required')
 }
 
 const desktopPid = Number(process.env.DSH_DESKTOP_PARENT_PID)
