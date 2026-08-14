@@ -33,7 +33,7 @@ const targets = {
   },
 };
 
-const targetKey = `${process.platform}-${process.arch}`;
+const targetKey = process.env.DSH_DESKTOP_RUNTIME_TARGET ?? `${process.platform}-${process.arch}`;
 const target = targets[targetKey];
 if (!target) {
   throw new Error(`Unsupported release target: ${targetKey}`);

@@ -27,18 +27,22 @@ jobs:
           - name: macOS Apple Silicon
             runner: macos-15
             target: aarch64-apple-darwin
+            runtimeTarget: darwin-arm64
             bundles: app,dmg
           - name: macOS Intel
-            runner: macos-15-intel
+            runner: macos-15
             target: x86_64-apple-darwin
+            runtimeTarget: darwin-x64
             bundles: app,dmg
           - name: Windows x64
             runner: windows-2022
             target: x86_64-pc-windows-msvc
+            runtimeTarget: win32-x64
             bundles: msi,nsis
           - name: Linux x64
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+            runtimeTarget: linux-x64
             bundles: deb
 
     steps:
@@ -65,6 +69,8 @@ jobs:
 
       - name: Prepare official DSH runtime
         run: npm run prepare:runtime
+        env:
+          DSH_DESKTOP_RUNTIME_TARGET: ${{ matrix.runtimeTarget }}
 
       - name: Build and publish
         uses: tauri-apps/tauri-action@v1
@@ -81,5 +87,6 @@ jobs:
           prerelease: true
           generateReleaseNotes: true
           uploadWorkflowArtifacts: true
+          retryAttempts: 1
           releaseAssetNamePattern: "[name]_[version]_[platform]_[arch]_[bundle][ext]"
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
