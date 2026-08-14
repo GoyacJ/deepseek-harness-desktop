@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": [
+      "resources/desktop-plugin/**/*",
+      "resources/runtime-bootstrap.mjs"
+    ]
+  }
+}

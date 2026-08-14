@@ -66,7 +66,9 @@ impl RuntimeController {
         window: WebviewWindow,
         landing_url: Url,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let config_started = Instant::now();
         let config = RuntimeConfig::resolve(app)?;
+        let config_elapsed = config_started.elapsed();
         let snapshot = Arc::new(Mutex::new(RuntimeSnapshot::initial(
             config.package_spec.clone(),
         )));
@@ -77,7 +79,14 @@ impl RuntimeController {
         thread::Builder::new()
             .name("dsh-runtime-supervisor".into())
             .spawn(move || {
-                supervisor_loop(config, receiver, thread_snapshot, window, landing_url)
+                supervisor_loop(
+                    config,
+                    receiver,
+                    thread_snapshot,
+                    window,
+                    landing_url,
+                    config_elapsed,
+                )
             })?;
 
         Ok(Self {
@@ -91,6 +100,18 @@ impl RuntimeController {
         lock_snapshot(&self.snapshot).clone()
     }
 
+    pub fn owns_ready_url(&self, url: &Url) -> bool {
+        let snapshot = lock_snapshot(&self.snapshot);
+        let Some(runtime_url) = snapshot
+            .url
+            .as_deref()
+            .and_then(|value| Url::parse(value).ok())
+        else {
+            return false;
+        };
+        same_http_origin(&runtime_url, url)
+    }
+
     pub fn restart(&self) -> Result<(), String> {
         self.commands
             .send(SupervisorCommand::Restart)
@@ -98,6 +119,10 @@ impl RuntimeController {
     }
 
     pub fn shutdown(&self) {
+        self.request_shutdown();
+    }
+
+    fn request_shutdown(&self) {
         if self.shutdown_started.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -110,6 +135,12 @@ impl RuntimeController {
         {
             let _ = completed.recv_timeout(Duration::from_secs(7));
         }
+    }
+}
+
+impl Drop for RuntimeController {
+    fn drop(&mut self) {
+        self.request_shutdown();
     }
 }
 
@@ -154,8 +185,8 @@ struct RuntimeConfig {
 
 impl RuntimeConfig {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let app_data = app.path().app_data_dir()?;
-        let app_cache = app.path().app_cache_dir()?;
+        let app_data = scoped_runtime_root(&app.path().app_data_dir()?);
+        let app_cache = scoped_runtime_root(&app.path().app_cache_dir()?);
         let resource_dir = app.path().resource_dir()?;
         let dsh_home = app_data.join("dsh");
         let npm_cache = app_cache.join("npm");
@@ -213,6 +244,7 @@ impl RuntimeConfig {
             .env("NPM_CONFIG_FUND", "false")
             .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
             .env("NO_UPDATE_NOTIFIER", "1")
+            .env("DSH_DESKTOP_PARENT_PID", std::process::id().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -234,6 +266,14 @@ impl RuntimeConfig {
     }
 }
 
+fn scoped_runtime_root(base: &Path) -> PathBuf {
+    if cfg!(debug_assertions) {
+        base.join("development")
+    } else {
+        base.to_path_buf()
+    }
+}
+
 fn bundled_path_env(program: &Path) -> Option<OsString> {
     let node_directory = program.parent()?;
     let mut paths = vec![node_directory.to_path_buf()];
@@ -244,21 +284,41 @@ fn bundled_path_env(program: &Path) -> Option<OsString> {
 }
 
 fn resolve_launcher(resource_dir: &Path, package_spec: &str) -> Launcher {
-    let bundled_root = resource_dir.join("resources/dsh-runtime");
-    let bundled_node = if cfg!(windows) {
-        bundled_root.join("node/node.exe")
-    } else {
-        bundled_root.join("node/bin/node")
-    };
-    let bundled_entry = bundled_root.join("app/node_modules/@deepseek-ai/dsh/lib/bin.js");
+    let packaged_root = resource_dir.join("resources/dsh-runtime");
+    let development_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/dsh-runtime");
+    let packaged_bootstrap = resource_dir.join("resources/runtime-bootstrap.mjs");
+    let development_bootstrap =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime-bootstrap.mjs");
+    let mut bundled_candidates = Vec::with_capacity(2);
+    if cfg!(debug_assertions) {
+        bundled_candidates.push((
+            development_root,
+            development_bootstrap,
+            "开发目录中的官方 DSH npm 运行时",
+        ));
+    }
+    bundled_candidates.push((
+        packaged_root,
+        packaged_bootstrap,
+        "随安装包交付的官方 DSH npm 运行时",
+    ));
 
-    if bundled_node.is_file() && bundled_entry.is_file() {
-        return Launcher {
-            program: bundled_node,
-            prefix_args: vec![bundled_entry.into_os_string()],
-            description: "随安装包交付的官方 DSH npm 运行时".into(),
-            uses_npx: false,
+    for (bundled_root, bootstrap, description) in bundled_candidates {
+        let bundled_node = if cfg!(windows) {
+            bundled_root.join("node/node.exe")
+        } else {
+            bundled_root.join("node/bin/node")
         };
+        let bundled_entry = bundled_root.join("app/node_modules/@deepseek-ai/dsh/lib/bin.js");
+
+        if bundled_node.is_file() && bundled_entry.is_file() && bootstrap.is_file() {
+            return Launcher {
+                program: bundled_node,
+                prefix_args: vec![bootstrap.into_os_string(), bundled_entry.into_os_string()],
+                description: description.into(),
+                uses_npx: false,
+            };
+        }
     }
 
     let npx = env::var_os("DSH_DESKTOP_NPX")
@@ -308,10 +368,12 @@ fn write_generated_patch(
             "      config:\n",
             "        desktopVersion: {desktop_version}\n",
             "        dshPackage: {package_spec}\n",
+            "        desktopPid: {desktop_pid}\n",
         ),
         plugin_path = plugin_path,
         desktop_version = desktop_version,
         package_spec = package_spec,
+        desktop_pid = std::process::id(),
     );
     fs::write(&patch_path, contents)?;
     Ok(patch_path)
@@ -338,6 +400,7 @@ fn supervisor_loop(
     snapshot: SharedSnapshot,
     window: WebviewWindow,
     landing_url: Url,
+    config_elapsed: Duration,
 ) {
     let mut child: Option<Child> = None;
     let mut launched_at: Option<Instant> = None;
@@ -345,7 +408,9 @@ fn supervisor_loop(
     let ready_announced = Arc::new(AtomicBool::new(false));
     let mut ready = false;
     let mut http_ready_streak = 0_u8;
+    let mut http_response_announced = false;
     let mut launch_requested = true;
+    let mut launch_started = Instant::now();
 
     loop {
         match commands.recv_timeout(Duration::from_millis(100)) {
@@ -356,8 +421,10 @@ fn supervisor_loop(
                 ready_announced.store(false, Ordering::SeqCst);
                 ready = false;
                 http_ready_streak = 0;
+                http_response_announced = false;
                 launch_requested = true;
-                navigate(&window, landing_url.clone());
+                set_window_visible(&window, false);
+                let _ = navigate(&window, landing_url.clone());
             }
             Ok(SupervisorCommand::Shutdown(acknowledge)) => {
                 update_snapshot(&snapshot, |state| {
@@ -389,6 +456,8 @@ fn supervisor_loop(
             ready_announced.store(false, Ordering::SeqCst);
             ready = false;
             http_ready_streak = 0;
+            http_response_announced = false;
+            launch_started = Instant::now();
             port = match available_port() {
                 Ok(port) => port,
                 Err(error) => {
@@ -409,6 +478,15 @@ fn supervisor_loop(
                 state.pid = None;
                 state.recent_logs.clear();
             });
+            push_startup_log(
+                &snapshot,
+                launch_started,
+                format!(
+                    "启动配置解析完成（{} ms），运行方式：{}",
+                    config_elapsed.as_millis(),
+                    config.launcher.description
+                ),
+            );
 
             let mut command = config.command(port);
             match command.spawn() {
@@ -421,6 +499,11 @@ fn supervisor_loop(
                         ready_announced.clone(),
                     );
                     update_snapshot(&snapshot, |state| state.pid = Some(pid));
+                    push_startup_log(
+                        &snapshot,
+                        launch_started,
+                        format!("DSH 进程已创建，PID {pid}"),
+                    );
                     launched_at = Some(Instant::now());
                     child = Some(spawned);
                 }
@@ -469,6 +552,10 @@ fn supervisor_loop(
 
         let elapsed = launched_at.map(|time| time.elapsed()).unwrap_or_default();
         let http_ready = probe_http(port);
+        if http_ready && !http_response_announced {
+            http_response_announced = true;
+            push_startup_log(&snapshot, launch_started, "DSH HTTP 服务开始响应".into());
+        }
         http_ready_streak = if http_ready {
             http_ready_streak.saturating_add(1)
         } else {
@@ -487,7 +574,19 @@ fn supervisor_loop(
                 state.url = Some(url.clone());
             });
             if let Ok(parsed) = Url::parse(&url) {
-                navigate(&window, parsed);
+                push_startup_log(
+                    &snapshot,
+                    launch_started,
+                    "DSH 已就绪，正在加载官方界面".into(),
+                );
+                if let Err(error) = navigate(&window, parsed) {
+                    fail(
+                        &snapshot,
+                        &window,
+                        &landing_url,
+                        format!("无法打开 DSH Web UI：{error}"),
+                    );
+                }
             }
         } else if elapsed >= config.startup_timeout {
             if let Some(mut timed_out) = child.take() {
@@ -573,6 +672,13 @@ fn http_status_is_ready(response: &[u8]) -> bool {
         || response.starts_with("HTTP/1.0 3")
 }
 
+fn same_http_origin(expected: &Url, actual: &Url) -> bool {
+    matches!(expected.scheme(), "http" | "https")
+        && expected.scheme() == actual.scheme()
+        && expected.host_str() == actual.host_str()
+        && expected.port_or_known_default() == actual.port_or_known_default()
+}
+
 fn terminate_process(child: &mut Child) {
     let pid = child.id();
 
@@ -607,10 +713,31 @@ fn terminate_process(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn navigate(window: &WebviewWindow, url: Url) {
+fn navigate(window: &WebviewWindow, url: Url) -> Result<(), String> {
     let window_for_navigation = window.clone();
+    let (result_sender, result_receiver) = mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let result = window_for_navigation
+                .navigate(url)
+                .map_err(|error| error.to_string());
+            let _ = result_sender.send(result);
+        })
+        .map_err(|error| error.to_string())?;
+    result_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "窗口导航请求没有完成".to_string())?
+}
+
+fn set_window_visible(window: &WebviewWindow, visible: bool) {
+    let window_for_visibility = window.clone();
     let _ = window.run_on_main_thread(move || {
-        let _ = window_for_navigation.navigate(url);
+        if visible {
+            let _ = window_for_visibility.show();
+            let _ = window_for_visibility.set_focus();
+        } else {
+            let _ = window_for_visibility.hide();
+        }
     });
 }
 
@@ -622,7 +749,15 @@ fn fail(snapshot: &SharedSnapshot, window: &WebviewWindow, landing_url: &Url, me
         state.url = None;
         state.pid = None;
     });
-    navigate(window, landing_url.clone());
+    let _ = navigate(window, landing_url.clone());
+    set_window_visible(window, true);
+}
+
+fn push_startup_log(snapshot: &SharedSnapshot, started: Instant, message: String) {
+    push_log(
+        snapshot,
+        format!("[desktop +{}ms] {message}", started.elapsed().as_millis()),
+    );
 }
 
 fn push_log(snapshot: &SharedSnapshot, line: String) {
@@ -689,6 +824,15 @@ mod tests {
     }
 
     #[test]
+    fn runtime_url_match_requires_the_exact_dsh_port() {
+        let runtime = Url::parse("http://127.0.0.1:43123").unwrap();
+        let runtime_page = Url::parse("http://127.0.0.1:43123/session/abc").unwrap();
+        let tauri_dev_page = Url::parse("http://127.0.0.1:1430").unwrap();
+        assert!(same_http_origin(&runtime, &runtime_page));
+        assert!(!same_http_origin(&runtime, &tauri_dev_page));
+    }
+
+    #[test]
     fn official_package_is_pinned() {
         assert_eq!(OFFICIAL_DSH_PACKAGE, "@deepseek-ai/dsh@0.1.0-rc.6");
     }
@@ -707,6 +851,18 @@ mod tests {
         let contents = std::fs::read_to_string(patch).unwrap();
         assert!(contents.contains("- insert:\n    - id: desktop-runtime\n"));
         assert!(contents.contains("      config:\n        desktopVersion:"));
+        assert!(contents.contains("        desktopPid:"));
+    }
+
+    #[test]
+    fn development_runtime_data_is_isolated_from_release_data() {
+        let base = Path::new("/app-data");
+        let scoped = scoped_runtime_root(base);
+        if cfg!(debug_assertions) {
+            assert_eq!(scoped, base.join("development"));
+        } else {
+            assert_eq!(scoped, base);
+        }
     }
 
     #[test]

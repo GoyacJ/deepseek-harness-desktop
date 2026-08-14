@@ -20,10 +20,11 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 
 ```sh
 npm install
+npm run prepare:runtime
 npm run dev
 ```
 
-第一次启动需要由 `npx` 下载锁定的 DSH 版本，耗时取决于 npm 网络。DSH 数据写入系统应用数据目录，不写入本仓库。
+`prepare:runtime` 下载并校验一次固定 Node.js 和 DSH 运行时。后续开发启动直接使用该目录，不重复复制运行时；缺少该目录时才回退到系统 `npx`。开发版与发行版使用隔离的数据目录，均不向仓库写入 DSH 用户数据。
 
 ## 发行构建
 

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tauri dev",
+    "dev": "tauri dev --config src-tauri/tauri.dev.conf.json",
     "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "build": "npm run prepare:runtime && tauri build",
     "build:shell": "tauri build",
