@@ -10,6 +10,28 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 
 桌面端只负责进程生命周期、窗口和后续原生能力。Agent、会话、工具和 Web UI 继续由官方 DSH 提供。
 
+## 界面预览
+
+### 对话与工具调用
+
+![对话与工具调用](docs/screenshots/conversation.png)
+
+### 会话轨迹
+
+![会话轨迹](docs/screenshots/trace.png)
+
+### Agent 预设
+
+![Agent 预设](docs/screenshots/agent-presets.png)
+
+### 插件配置
+
+![插件配置](docs/screenshots/plugin-config.png)
+
+### 插件列表
+
+![插件列表](docs/screenshots/plugin-list.png)
+
 ## 开发
 
 要求：

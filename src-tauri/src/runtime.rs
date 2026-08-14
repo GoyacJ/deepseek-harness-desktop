@@ -289,19 +289,19 @@ fn resolve_launcher(resource_dir: &Path, package_spec: &str) -> Launcher {
     let packaged_bootstrap = resource_dir.join("resources/runtime-bootstrap.mjs");
     let development_bootstrap =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/runtime-bootstrap.mjs");
-    let mut bundled_candidates = Vec::with_capacity(2);
-    if cfg!(debug_assertions) {
-        bundled_candidates.push((
+    let bundled_candidates = if cfg!(debug_assertions) {
+        vec![(
             development_root,
             development_bootstrap,
             "开发目录中的官方 DSH npm 运行时",
-        ));
-    }
-    bundled_candidates.push((
-        packaged_root,
-        packaged_bootstrap,
-        "随安装包交付的官方 DSH npm 运行时",
-    ));
+        )]
+    } else {
+        vec![(
+            packaged_root,
+            packaged_bootstrap,
+            "随安装包交付的官方 DSH npm 运行时",
+        )]
+    };
 
     for (bundled_root, bootstrap, description) in bundled_candidates {
         let bundled_node = if cfg!(windows) {
@@ -882,5 +882,31 @@ mod tests {
         let value = bundled_path_env(program).unwrap();
         let first = env::split_paths(&value).next().unwrap();
         assert_eq!(first, program.parent().unwrap());
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn development_launcher_ignores_stale_packaged_runtime() {
+        let temporary = std::env::temp_dir().join(format!(
+            "dsh-desktop-stale-runtime-test-{}",
+            std::process::id()
+        ));
+        let stale_root = temporary.join("resources/dsh-runtime");
+        let stale_node = if cfg!(windows) {
+            stale_root.join("node/node.exe")
+        } else {
+            stale_root.join("node/bin/node")
+        };
+        let stale_entry = stale_root.join("app/node_modules/@deepseek-ai/dsh/lib/bin.js");
+        std::fs::create_dir_all(stale_node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(stale_entry.parent().unwrap()).unwrap();
+        std::fs::write(&stale_node, []).unwrap();
+        std::fs::write(&stale_entry, []).unwrap();
+        std::fs::create_dir_all(temporary.join("resources")).unwrap();
+        std::fs::write(temporary.join("resources/runtime-bootstrap.mjs"), []).unwrap();
+
+        let launcher = resolve_launcher(&temporary, OFFICIAL_DSH_PACKAGE);
+
+        assert_ne!(launcher.program, stale_node);
     }
 }
