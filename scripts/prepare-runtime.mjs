@@ -126,10 +126,14 @@ async function installDsh() {
   for (const filename of ["package.json", "package-lock.json"]) {
     await copyFile(path.join(sourceRoot, filename), path.join(appRoot, filename));
   }
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) {
+    throw new Error("Run runtime preparation through npm run prepare:runtime");
+  }
   await run(
-    npm,
+    process.execPath,
     [
+      npmCli,
       "ci",
       "--omit=dev",
       "--no-audit",
