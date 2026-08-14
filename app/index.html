@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepSeek Harness Desktop</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="status-card" aria-live="polite">
+        <div class="brand-mark">DS</div>
+        <div class="content">
+          <p class="eyebrow">DeepSeek Harness Desktop</p>
+          <h1 id="title">正在启动官方 DSH</h1>
+          <p id="message" class="message">正在准备独立运行环境。</p>
+          <div class="meta">
+            <span id="package">@deepseek-ai/dsh</span>
+            <span id="pid">等待进程</span>
+          </div>
+          <button id="retry" type="button" hidden>重新启动</button>
+          <details id="diagnostics" hidden>
+            <summary>诊断日志</summary>
+            <pre id="logs"></pre>
+          </details>
+        </div>
+      </section>
+    </main>
+    <script src="./app.js"></script>
+  </body>
+</html>

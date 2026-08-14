@@ -1,0 +1,85 @@
+name: Release desktop apps
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: >-
+      github.ref_type == 'tag' ||
+      github.event_name == 'workflow_dispatch' ||
+      startsWith(github.event.head_commit.message, 'release:')
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - name: macOS Intel
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            bundles: app,dmg
+          - name: Windows x64
+            runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+          - name: Linux x64
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Prepare official DSH runtime
+        run: npm run prepare:runtime
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: DeepSeek Harness Desktop v__VERSION__
+          releaseBody: |
+            首个桌面预览版本。安装包已内置 Node.js 22.23.2 和官方 @deepseek-ai/dsh@0.1.0-rc.6。
+
+            macOS 安装包未做 Apple Developer ID 签名。Windows 安装包未做代码签名。
+          releaseDraft: false
+          prerelease: true
+          generateReleaseNotes: true
+          uploadWorkflowArtifacts: true
+          releaseAssetNamePattern: "[name]_[version]_[platform]_[arch]_[bundle][ext]"
+          args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
