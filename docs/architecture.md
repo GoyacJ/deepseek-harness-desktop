@@ -4,28 +4,33 @@
 
 1. 不 fork、不修改、不重新编译 `deepseek-ai/deepseek-harness` 源码。
 2. DSH 运行时来自官方 `@deepseek-ai/dsh` npm 发布物。
-3. 每个桌面版本固定一个 DSH 精确版本，不跟随 `latest`。
+3. 安装包锁定一个出厂 DSH 精确版本，作为默认和回退点。用户可以把 sidecar 更新到官方 npm `latest`，不改安装包。
 4. 新的 Agent 能力通过独立 DSH 插件接入。
 5. 窗口、托盘、更新、Keychain 等操作系统能力由 Tauri 提供。
 
-当前固定版本为 `@deepseek-ai/dsh@0.1.0-rc.6`。
+当前出厂版本为 `@deepseek-ai/dsh@0.1.0-rc.6`。检查更新读取 npm `@deepseek-ai/dsh` 的 `latest` dist-tag；比当前运行版本新、且随包 Node 满足 `engines` 时，允许安装。
 
 ## 运行结构
 
 ```mermaid
 flowchart TD
   T["Tauri 2"] --> S["DSH 进程监督器"]
-  S --> N["官方 @deepseek-ai/dsh 固定版本"]
+  S --> R{"sidecar 完整"}
+  R -->|是| N["数据目录中的 npm latest sidecar"]
+  R -->|否| B["随包 @deepseek-ai/dsh"]
   N --> H["127.0.0.1 随机端口"]
+  B --> H
   H --> W["Tauri WebView"]
   P["独立 Desktop DSH 插件"] --> N
+  P --> B
   T --> D["独立应用数据目录"]
   N --> D
+  B --> D
 ```
 
-Tauri 启动 DSH 后轮询本地 HTTP 服务。服务可用时，主 WebView 从内置启动页导航到官方 Web UI。DSH 意外退出时，WebView 返回内置错误页，保留最近的子进程日志并允许重启。
+Tauri 启动 DSH 后轮询本地 HTTP 服务。服务可用时，主 WebView 从内置启动页导航到官方 Web UI。DSH 意外退出时，WebView 返回内置错误页，保留最近的子进程日志并允许重启。sidecar 在启动完成前失败时，监督器回退到上一份 sidecar 或随包版本再启。
 
-主窗口默认隐藏。只有官方 Web UI 完成页面加载后才显示；内置页面只在启动失败或运行时退出时作为恢复界面出现。第二次启动由 Tauri 单实例插件转交给已有实例，不会再创建一套 DSH 进程。
+主窗口默认隐藏。只有官方 Web UI 完成页面加载后才显示；内置页面只在启动失败、运行时退出或正在切换 DSH 时作为恢复界面出现。第二次启动由 Tauri 单实例插件转交给已有实例，不会再创建一套 DSH 进程。
 
 ## 开发与发行
 
@@ -40,9 +45,24 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web \
 
 本地已经执行过 `npm run prepare:runtime` 时，开发模式优先直接使用 `src-tauri/resources/dsh-runtime`，不再把约数百 MB 的运行时复制到 `target/debug/resources`。开发版数据写入应用目录下的 `development` 子目录，与发行版隔离。缺少本地运行时时才回退到系统 `npx`。
 
-发行模式不在用户机器上联网执行 `npx`。构建阶段安装相同的官方 npm 版本，并随 App 交付固定的 Node.js 22.23.2 和 npm 安装目录。Node.js 发行档案先按官方 `SHASUMS256.txt` 校验。监督器优先发现随包运行时；不存在时才回退到系统 `npx`。
+发行模式启动不跑 `npx`。构建阶段安装锁定的官方 `@deepseek-ai/dsh`，并随 App 交付固定的 Node.js 22.23.2（含 npm）。监督器按 sidecar、随包运行时、系统 `npx` 的顺序查找。用户选择更新时，才用随包 npm 安装 npm `latest`。
 
-这两条路径运行同一个官方 `lib/bin.js`，区别只在交付方式。
+这两条路径运行同一个官方 `lib/bin.js`，区别只在交付方式。sidecar 只替换 DSH 的 `app` 树，Node 仍用随包二进制。
+
+## DSH sidecar 更新
+
+检查更新读取 `https://registry.npmjs.org/@deepseek-ai/dsh/latest`，连不上再试 npmmirror。不跟 GitHub 兼容列表。可用 `DSH_DESKTOP_NPM_REGISTRY` 覆盖 registry。
+
+安装用随包 Node 自带的 npm（开发回退则用系统 npm）执行 `npm install @deepseek-ai/dsh@<latest>`，写入 `{app_data}/runtimes/dsh/{version}/`。校验 `package.json` 版本和 `lib/bin.js` 后激活 sidecar 并重启。随包版本仍可从菜单恢复。只保留当前和上一份 sidecar。变更操作只走应用菜单；官方 Web UI 不能安装或切换。
+
+如果 npm latest 的 `engines.node` 超出随包 Node `22.23.2`，桌面端拒绝安装，需要先发带新 Node 的桌面版本。
+
+数据目录：
+
+- `{app_data}/runtimes/dsh/{version}/`：该版本的官方 `app` 树
+- `{app_data}/runtime-state.json`：当前版本、上一版本、来源（`sidecar` / `bundled`）
+
+检查和安装在后台线程做，不堵住正在跑的 DSH。启动页只读展示版本和更新阶段。
 
 ## 插件边界
 
@@ -71,10 +91,12 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web \
 
 ## 升级规则
 
-升级 DSH 时必须同时修改锁定版本并验证：
+更换安装包出厂 DSH 版本，或用户安装 npm latest sidecar 后，应满足：
 
 1. 官方 Web UI 可启动。
 2. Desktop patch 可加载。
 3. 新建会话和已有会话恢复正常。
 4. DSH 崩溃后能返回启动页并重启。
 5. App 退出后没有遗留 Node、npm 或 DSH 进程。
+
+更换安装包出厂版本时，须同时修改锁定版本。

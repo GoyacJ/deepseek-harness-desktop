@@ -1,7 +1,10 @@
 const title = document.querySelector('#title')
 const message = document.querySelector('#message')
 const packageName = document.querySelector('#package')
+const version = document.querySelector('#version')
+const source = document.querySelector('#source')
 const pid = document.querySelector('#pid')
+const update = document.querySelector('#update')
 const retry = document.querySelector('#retry')
 const diagnostics = document.querySelector('#diagnostics')
 const logs = document.querySelector('#logs')
@@ -11,12 +14,30 @@ const invoke = window.__TAURI__?.core?.invoke
 function render(snapshot) {
   const phase = snapshot.phase
   packageName.textContent = snapshot.package_spec
+  version.textContent = `DSH ${snapshot.dsh_version ?? ''}`
+  source.textContent = snapshot.runtime_source ?? 'bundled'
   pid.textContent = snapshot.pid ? `PID ${snapshot.pid}` : '等待进程'
   message.textContent = snapshot.message
   logs.textContent = snapshot.recent_logs.join('\n')
   diagnostics.hidden = snapshot.recent_logs.length === 0
 
-  if (phase === 'failed') {
+  const updateMessage = snapshot.update_message
+  const updatePhase = snapshot.update_phase
+  if (updateMessage && updatePhase && updatePhase !== 'idle') {
+    update.hidden = false
+    update.textContent = updateMessage
+  } else if (updateMessage) {
+    update.hidden = false
+    update.textContent = updateMessage
+  } else {
+    update.hidden = true
+    update.textContent = ''
+  }
+
+  if (updatePhase === 'switching' || updatePhase === 'rolling_back') {
+    title.textContent = updatePhase === 'switching' ? '正在切换 DSH' : '正在回退 DSH'
+    retry.hidden = true
+  } else if (phase === 'failed') {
     title.textContent = 'DSH 启动失败'
     retry.hidden = false
     retry.disabled = false

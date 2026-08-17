@@ -1,3 +1,7 @@
+use crate::update::{
+    load_runtime_state, rollback_runtime_state, sidecar_app_root, sidecar_entry, sidecar_is_complete,
+    RuntimeSource, StepStatus, UpdatePhase, UpdateStep,
+};
 use serde::Serialize;
 use std::{
     env,
@@ -17,6 +21,8 @@ use std::{
 };
 use tauri::{AppHandle, Manager, Url, WebviewWindow};
 
+pub const BUNDLED_DSH_VERSION: &str = "0.1.0-rc.6";
+pub const BUNDLED_NODE_VERSION: &str = "22.23.2";
 const OFFICIAL_DSH_PACKAGE: &str = "@deepseek-ai/dsh@0.1.0-rc.6";
 const DEFAULT_STARTUP_TIMEOUT_SECS: u64 = 300;
 const MAX_LOG_LINES: usize = 180;
@@ -40,20 +46,36 @@ pub struct RuntimeSnapshot {
     pub phase: RuntimePhase,
     pub message: String,
     pub package_spec: String,
+    pub dsh_version: String,
+    pub runtime_source: String,
     pub url: Option<String>,
     pub pid: Option<u32>,
     pub recent_logs: Vec<String>,
+    pub update_phase: UpdatePhase,
+    pub update_message: String,
+    pub available_version: Option<String>,
+    pub update_bytes_read: u64,
+    pub update_bytes_total: u64,
+    pub update_steps: Vec<UpdateStep>,
 }
 
 impl RuntimeSnapshot {
-    fn initial(package_spec: String) -> Self {
+    fn initial(package_spec: String, dsh_version: String, runtime_source: String) -> Self {
         Self {
             phase: RuntimePhase::Starting,
             message: "正在准备官方 DSH 运行时。".into(),
             package_spec,
+            dsh_version,
+            runtime_source,
             url: None,
             pid: None,
             recent_logs: Vec::new(),
+            update_phase: UpdatePhase::Idle,
+            update_message: String::new(),
+            available_version: None,
+            update_bytes_read: 0,
+            update_bytes_total: 0,
+            update_steps: Vec::new(),
         }
     }
 }
@@ -75,6 +97,8 @@ impl RuntimeController {
         let config_elapsed = config_started.elapsed();
         let snapshot = Arc::new(Mutex::new(RuntimeSnapshot::initial(
             config.package_spec.clone(),
+            config.launcher.dsh_version.clone(),
+            config.launcher.kind.label().to_string(),
         )));
         let (commands, receiver) = mpsc::channel();
         install_termination_handler(commands.clone())?;
@@ -120,6 +144,25 @@ impl RuntimeController {
         self.commands
             .send(SupervisorCommand::Restart)
             .map_err(|_| "DSH 监督器已经停止".to_string())
+    }
+
+    pub fn set_update_flow(
+        &self,
+        phase: UpdatePhase,
+        message: impl Into<String>,
+        available_version: Option<String>,
+        steps: Vec<UpdateStep>,
+    ) {
+        update_snapshot(&self.snapshot, |state| {
+            if !matches!(phase, UpdatePhase::Downloading) {
+                state.update_bytes_read = 0;
+                state.update_bytes_total = 0;
+            }
+            state.update_phase = phase;
+            state.update_message = message.into();
+            state.available_version = available_version;
+            state.update_steps = steps;
+        });
     }
 
     pub fn shutdown(&self) {
@@ -168,6 +211,23 @@ enum SupervisorCommand {
     Shutdown(Sender<()>),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LauncherKind {
+    Sidecar,
+    Bundled,
+    Npx,
+}
+
+impl LauncherKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Sidecar => "sidecar",
+            Self::Bundled => "bundled",
+            Self::Npx => "npx",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Launcher {
     program: PathBuf,
@@ -175,10 +235,13 @@ struct Launcher {
     environment: Vec<(OsString, OsString)>,
     description: String,
     uses_npx: bool,
+    kind: LauncherKind,
+    dsh_version: String,
 }
 
 #[derive(Clone, Debug)]
 struct RuntimeConfig {
+    requested_spec: String,
     package_spec: String,
     launcher: Launcher,
     dsh_home: PathBuf,
@@ -186,6 +249,9 @@ struct RuntimeConfig {
     workspace: PathBuf,
     patch: Option<PathBuf>,
     startup_timeout: Duration,
+    resource_dir: PathBuf,
+    app_data: PathBuf,
+    plugin_path: Option<PathBuf>,
 }
 
 impl RuntimeConfig {
@@ -203,15 +269,19 @@ impl RuntimeConfig {
         fs::create_dir_all(&npm_cache)?;
         fs::create_dir_all(&workspace)?;
 
-        let package_spec =
+        let requested_spec =
             env::var("DSH_DESKTOP_PACKAGE").unwrap_or_else(|_| OFFICIAL_DSH_PACKAGE.to_string());
-        let launcher = resolve_launcher(&resource_dir, &package_spec);
-        let patch = if env::var_os("DSH_DESKTOP_DISABLE_PLUGIN").is_some() {
+        let launcher = resolve_launcher(&resource_dir, &app_data, &requested_spec);
+        let package_spec = format!("@deepseek-ai/dsh@{}", launcher.dsh_version);
+        let plugin_path = if env::var_os("DSH_DESKTOP_DISABLE_PLUGIN").is_some() {
             None
         } else {
-            let plugin = resolve_desktop_plugin(&resource_dir)?;
-            Some(write_generated_patch(&dsh_home, &plugin, &package_spec)?)
+            Some(resolve_desktop_plugin(&resource_dir)?)
         };
+        let patch = plugin_path
+            .as_ref()
+            .map(|plugin| write_generated_patch(&dsh_home, plugin, &package_spec))
+            .transpose()?;
         let startup_timeout = env::var("DSH_DESKTOP_STARTUP_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -219,6 +289,7 @@ impl RuntimeConfig {
             .unwrap_or(DEFAULT_STARTUP_TIMEOUT_SECS);
 
         Ok(Self {
+            requested_spec,
             package_spec,
             launcher,
             dsh_home,
@@ -226,7 +297,18 @@ impl RuntimeConfig {
             workspace,
             patch,
             startup_timeout: Duration::from_secs(startup_timeout),
+            resource_dir,
+            app_data,
+            plugin_path,
         })
+    }
+
+    fn rebind(&mut self) {
+        self.launcher = resolve_launcher(&self.resource_dir, &self.app_data, &self.requested_spec);
+        self.package_spec = format!("@deepseek-ai/dsh@{}", self.launcher.dsh_version);
+        self.patch = self.plugin_path.as_ref().and_then(|plugin| {
+            write_generated_patch(&self.dsh_home, plugin, &self.package_spec).ok()
+        });
     }
 
     fn command(&self, port: u16) -> Command {
@@ -277,7 +359,7 @@ impl RuntimeConfig {
     }
 }
 
-fn scoped_runtime_root(base: &Path) -> PathBuf {
+pub(crate) fn scoped_runtime_root(base: &Path) -> PathBuf {
     if cfg!(debug_assertions) {
         base.join("development")
     } else {
@@ -294,7 +376,66 @@ fn bundled_path_env(program: &Path) -> Option<OsString> {
     env::join_paths(paths).ok()
 }
 
-fn resolve_launcher(resource_dir: &Path, package_spec: &str) -> Launcher {
+fn resolve_launcher(resource_dir: &Path, app_data: &Path, package_spec: &str) -> Launcher {
+    resolve_launcher_with_host(discover_bundled_host(resource_dir), app_data, package_spec)
+}
+
+fn resolve_launcher_with_host(
+    host: Option<BundledHost>,
+    app_data: &Path,
+    package_spec: &str,
+) -> Launcher {
+    let state = load_runtime_state(app_data);
+
+    if let Some(host) = host.as_ref() {
+        if state.source == RuntimeSource::Sidecar {
+            let sidecar = sidecar_app_root(app_data, &state.active_version);
+            if sidecar_is_complete(&sidecar) {
+                return bundled_launcher(
+                    host.node.clone(),
+                    host.bootstrap.clone(),
+                    sidecar_entry(&sidecar),
+                    "用户数据目录中的 DSH 运行时",
+                    LauncherKind::Sidecar,
+                    dsh_version_from_entry(&sidecar_entry(&sidecar), &state.active_version),
+                );
+            }
+        }
+
+        if let Some(entry) = host.bundled_entry.clone() {
+            return bundled_launcher(
+                host.node.clone(),
+                host.bootstrap.clone(),
+                entry.clone(),
+                host.description,
+                LauncherKind::Bundled,
+                dsh_version_from_entry(&entry, BUNDLED_DSH_VERSION),
+            );
+        }
+    }
+
+    let npx = env::var_os("DSH_DESKTOP_NPX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "npx.cmd" } else { "npx" }));
+    Launcher {
+        program: npx,
+        prefix_args: vec![OsString::from("--yes"), OsString::from(package_spec)],
+        environment: Vec::new(),
+        description: "系统 npx + 固定官方 DSH 版本".into(),
+        uses_npx: true,
+        kind: LauncherKind::Npx,
+        dsh_version: version_from_spec(package_spec),
+    }
+}
+
+struct BundledHost {
+    node: PathBuf,
+    bootstrap: PathBuf,
+    bundled_entry: Option<PathBuf>,
+    description: &'static str,
+}
+
+fn discover_bundled_host(resource_dir: &Path) -> Option<BundledHost> {
     let packaged_root = resource_dir.join("resources/dsh-runtime");
     let development_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/dsh-runtime");
     let packaged_bootstrap = resource_dir.join("resources/runtime-bootstrap.mjs");
@@ -320,23 +461,48 @@ fn resolve_launcher(resource_dir: &Path, package_spec: &str) -> Launcher {
         } else {
             bundled_root.join("node/bin/node")
         };
-        let bundled_entry = bundled_root.join("app/node_modules/@deepseek-ai/dsh/lib/bin.js");
-
-        if bundled_node.is_file() && bundled_entry.is_file() && bootstrap.is_file() {
-            return bundled_launcher(bundled_node, bootstrap, bundled_entry, description);
+        if bundled_node.is_file() && bootstrap.is_file() {
+            let bundled_entry = bundled_root.join("app/node_modules/@deepseek-ai/dsh/lib/bin.js");
+            return Some(BundledHost {
+                node: bundled_node,
+                bootstrap,
+                bundled_entry: bundled_entry.is_file().then_some(bundled_entry),
+                description,
+            });
         }
     }
+    None
+}
 
-    let npx = env::var_os("DSH_DESKTOP_NPX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "npx.cmd" } else { "npx" }));
-    Launcher {
-        program: npx,
-        prefix_args: vec![OsString::from("--yes"), OsString::from(package_spec)],
-        environment: Vec::new(),
-        description: "系统 npx + 固定官方 DSH 版本".into(),
-        uses_npx: true,
+pub(crate) struct NpmInvoker {
+    pub program: PathBuf,
+    pub prefix_args: Vec<OsString>,
+}
+
+pub(crate) fn resolve_npm(resource_dir: &Path) -> NpmInvoker {
+    if let Some(host) = discover_bundled_host(resource_dir) {
+        if let Some(cli) = npm_cli_js(&host.node) {
+            return NpmInvoker {
+                program: host.node,
+                prefix_args: vec![cli.into_os_string()],
+            };
+        }
     }
+    NpmInvoker {
+        program: env::var_os("DSH_DESKTOP_NPM")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(if cfg!(windows) { "npm.cmd" } else { "npm" })),
+        prefix_args: Vec::new(),
+    }
+}
+
+fn npm_cli_js(node: &Path) -> Option<PathBuf> {
+    let parent = node.parent()?;
+    let candidates = [
+        parent.join("node_modules/npm/bin/npm-cli.js"),
+        parent.join("../lib/node_modules/npm/bin/npm-cli.js"),
+    ];
+    candidates.into_iter().find(|path| path.is_file())
 }
 
 fn bundled_launcher(
@@ -344,6 +510,8 @@ fn bundled_launcher(
     bootstrap: PathBuf,
     entry: PathBuf,
     description: &str,
+    kind: LauncherKind,
+    dsh_version: String,
 ) -> Launcher {
     Launcher {
         program,
@@ -361,7 +529,27 @@ fn bundled_launcher(
         ],
         description: description.into(),
         uses_npx: false,
+        kind,
+        dsh_version,
     }
+}
+
+fn dsh_version_from_entry(entry: &Path, fallback: &str) -> String {
+    entry
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join("package.json"))
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|json| json.get("version")?.as_str().map(str::to_string))
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+fn version_from_spec(spec: &str) -> String {
+    spec.rsplit_once('@')
+        .map(|(_, version)| version.to_string())
+        .filter(|version| !version.is_empty() && !version.contains('/'))
+        .unwrap_or_else(|| BUNDLED_DSH_VERSION.to_string())
 }
 
 fn resolve_desktop_plugin(resource_dir: &Path) -> Result<PathBuf, std::io::Error> {
@@ -427,7 +615,7 @@ fn dsh_arguments(patch: Option<&Path>, port: u16) -> Vec<OsString> {
 }
 
 fn supervisor_loop(
-    config: RuntimeConfig,
+    mut config: RuntimeConfig,
     commands: Receiver<SupervisorCommand>,
     snapshot: SharedSnapshot,
     window: WebviewWindow,
@@ -450,13 +638,18 @@ fn supervisor_loop(
                 if let Some(mut running) = child.take() {
                     terminate_process(&mut running);
                 }
+                config.rebind();
                 ready_announced.store(false, Ordering::SeqCst);
                 ready = false;
                 http_ready_streak = 0;
                 http_response_announced = false;
                 launch_requested = true;
-                set_window_visible(&window, false);
+                let updating = matches!(
+                    lock_snapshot(&snapshot).update_phase,
+                    UpdatePhase::Switching | UpdatePhase::RollingBack
+                );
                 let _ = navigate(&window, landing_url.clone());
+                set_window_visible(&window, updating);
             }
             Ok(SupervisorCommand::Shutdown(acknowledge)) => {
                 update_snapshot(&snapshot, |state| {
@@ -506,6 +699,9 @@ fn supervisor_loop(
             update_snapshot(&snapshot, |state| {
                 state.phase = RuntimePhase::Starting;
                 state.message = format!("正在通过{}启动。", config.launcher.description);
+                state.package_spec = config.package_spec.clone();
+                state.dsh_version = config.launcher.dsh_version.clone();
+                state.runtime_source = config.launcher.kind.label().to_string();
                 state.url = None;
                 state.pid = None;
                 state.recent_logs.clear();
@@ -540,6 +736,13 @@ fn supervisor_loop(
                     child = Some(spawned);
                 }
                 Err(error) => {
+                    if rollback_failed_sidecar(&mut config, &snapshot, false) {
+                        crate::update::sync_update_toast(window.app_handle());
+                        let _ = navigate(&window, landing_url.clone());
+                        set_window_visible(&window, true);
+                        launch_requested = true;
+                        continue;
+                    }
                     fail(
                         &snapshot,
                         &window,
@@ -562,6 +765,13 @@ fn supervisor_loop(
                 } else {
                     format!("DSH 未完成启动：{status}")
                 };
+                if !ready && rollback_failed_sidecar(&mut config, &snapshot, ready) {
+                    crate::update::sync_update_toast(window.app_handle());
+                    let _ = navigate(&window, landing_url.clone());
+                    set_window_visible(&window, true);
+                    launch_requested = true;
+                    continue;
+                }
                 fail(&snapshot, &window, &landing_url, message);
                 continue;
             }
@@ -604,7 +814,26 @@ fn supervisor_loop(
                 state.phase = RuntimePhase::Ready;
                 state.message = "官方 DSH Web UI 已就绪。".into();
                 state.url = Some(url.clone());
+                if matches!(
+                    state.update_phase,
+                    UpdatePhase::Switching | UpdatePhase::RollingBack
+                ) {
+                    state.update_phase = UpdatePhase::Idle;
+                    state.update_message = format!("当前 DSH {}", state.dsh_version);
+                    state.available_version = None;
+                    for step in &mut state.update_steps {
+                        if step.status == StepStatus::Active {
+                            step.status = StepStatus::Done;
+                        }
+                    }
+                    for step in &mut state.update_steps {
+                        if step.status == StepStatus::Active {
+                            step.status = StepStatus::Done;
+                        }
+                    }
+                }
             });
+            crate::update::sync_update_toast(window.app_handle());
             if let Ok(parsed) = Url::parse(&url) {
                 push_startup_log(
                     &snapshot,
@@ -624,6 +853,13 @@ fn supervisor_loop(
             if let Some(mut timed_out) = child.take() {
                 terminate_process(&mut timed_out);
             }
+            if rollback_failed_sidecar(&mut config, &snapshot, false) {
+                crate::update::sync_update_toast(window.app_handle());
+                let _ = navigate(&window, landing_url.clone());
+                set_window_visible(&window, true);
+                launch_requested = true;
+                continue;
+            }
             fail(
                 &snapshot,
                 &window,
@@ -635,6 +871,38 @@ fn supervisor_loop(
             );
         }
     }
+}
+
+fn rollback_failed_sidecar(
+    config: &mut RuntimeConfig,
+    snapshot: &SharedSnapshot,
+    already_ready: bool,
+) -> bool {
+    if already_ready || config.launcher.kind != LauncherKind::Sidecar {
+        return false;
+    }
+    let previous = config.launcher.dsh_version.clone();
+    rollback_runtime_state(&config.app_data);
+    config.rebind();
+    if config.launcher.kind == LauncherKind::Sidecar && config.launcher.dsh_version == previous {
+        return false;
+    }
+    update_snapshot(snapshot, |state| {
+        state.update_phase = UpdatePhase::RollingBack;
+        state.update_message = format!(
+            "DSH {previous} 启动失败，正在回退到 {}。",
+            config.launcher.dsh_version
+        );
+        state.update_steps = vec![UpdateStep {
+            label: "回退运行时".into(),
+            status: StepStatus::Active,
+            detail: format!("DSH {previous} 启动失败"),
+        }];
+        state.package_spec = config.package_spec.clone();
+        state.dsh_version = config.launcher.dsh_version.clone();
+        state.runtime_source = config.launcher.kind.label().to_string();
+    });
+    true
 }
 
 fn readiness_gate(http_ready_streak: u8, announced: bool, elapsed: Duration) -> bool {
@@ -867,6 +1135,7 @@ mod tests {
     #[test]
     fn official_package_is_pinned() {
         assert_eq!(OFFICIAL_DSH_PACKAGE, "@deepseek-ai/dsh@0.1.0-rc.6");
+        assert!(OFFICIAL_DSH_PACKAGE.ends_with(BUNDLED_DSH_VERSION));
     }
 
     #[test]
@@ -927,6 +1196,8 @@ mod tests {
             bootstrap.clone(),
             entry.clone(),
             "test runtime",
+            LauncherKind::Bundled,
+            BUNDLED_DSH_VERSION.to_string(),
         );
 
         assert_eq!(
@@ -962,8 +1233,70 @@ mod tests {
         std::fs::create_dir_all(temporary.join("resources")).unwrap();
         std::fs::write(temporary.join("resources/runtime-bootstrap.mjs"), []).unwrap();
 
-        let launcher = resolve_launcher(&temporary, OFFICIAL_DSH_PACKAGE);
+        let launcher = resolve_launcher(&temporary, &temporary.join("app-data"), OFFICIAL_DSH_PACKAGE);
 
         assert_ne!(launcher.program, stale_node);
+        assert_eq!(launcher.kind, LauncherKind::Npx);
+    }
+
+    #[test]
+    fn sidecar_runtime_wins_over_bundled_when_state_points_at_it() {
+        let temporary = std::env::temp_dir().join(format!(
+            "dsh-desktop-sidecar-runtime-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let app_data = temporary.join("app-data");
+        let node = temporary.join("node-bin");
+        let bootstrap = temporary.join("runtime-bootstrap.mjs");
+        let bundled_entry = temporary.join("bundled/node_modules/@deepseek-ai/dsh/lib/bin.js");
+        std::fs::create_dir_all(bundled_entry.parent().unwrap()).unwrap();
+        std::fs::write(&node, []).unwrap();
+        std::fs::write(&bootstrap, []).unwrap();
+        std::fs::write(&bundled_entry, "bundled").unwrap();
+
+        let sidecar = crate::update::sidecar_app_root(&app_data, "0.1.0-rc.7");
+        let sidecar_entry = crate::update::sidecar_entry(&sidecar);
+        std::fs::create_dir_all(sidecar_entry.parent().unwrap()).unwrap();
+        std::fs::write(&sidecar_entry, "sidecar-entry").unwrap();
+        std::fs::write(
+            sidecar.join("node_modules/@deepseek-ai/dsh/package.json"),
+            r#"{"version":"0.1.0-rc.7"}"#,
+        )
+        .unwrap();
+        crate::update::save_runtime_state(
+            &app_data,
+            &crate::update::RuntimeState {
+                active_version: "0.1.0-rc.7".into(),
+                previous_version: None,
+                source: crate::update::RuntimeSource::Sidecar,
+            },
+        )
+        .unwrap();
+
+        let launcher = resolve_launcher_with_host(
+            Some(BundledHost {
+                node: node.clone(),
+                bootstrap,
+                bundled_entry: Some(bundled_entry),
+                description: "test bundled",
+            }),
+            &app_data,
+            OFFICIAL_DSH_PACKAGE,
+        );
+        assert_eq!(launcher.kind, LauncherKind::Sidecar);
+        assert_eq!(launcher.dsh_version, "0.1.0-rc.7");
+        assert_eq!(launcher.program, node);
+        assert_eq!(launcher.environment[1].1, sidecar_entry.as_os_str());
+        let _ = std::fs::remove_dir_all(temporary);
+    }
+
+    #[test]
+    fn spec_version_uses_the_rightmost_at_separator() {
+        assert_eq!(version_from_spec(OFFICIAL_DSH_PACKAGE), BUNDLED_DSH_VERSION);
+        assert_eq!(version_from_spec("@deepseek-ai/dsh"), BUNDLED_DSH_VERSION);
     }
 }

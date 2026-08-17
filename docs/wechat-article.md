@@ -78,9 +78,9 @@ npx @deepseek-ai/dsh web
 
 ## 版本固定与运行时内置
 
-桌面端没有在用户机器上动态安装最新版本的 DSH，而是为每个桌面版本锁定一个精确版本。
+每个桌面版本锁定一个出厂 DSH 精确版本。应用菜单可以检查官方 npm `latest`，安装到用户数据目录，不改安装包。
 
-当前 v0.1.5 对应官方 `@deepseek-ai/dsh@0.1.0-rc.6`。
+当前 v0.1.6 对应官方 `@deepseek-ai/dsh@0.1.0-rc.6`。
 
 固定版本可以保证同一桌面版本在不同机器上运行相同的 DSH，避免 `latest` 更新后出现行为差异。升级 DSH 时，桌面端会重新验证 Web UI 启动、插件加载、会话恢复、崩溃重启和进程退出等流程。
 
@@ -98,7 +98,7 @@ DeepSeek Harness Desktop 使用独立的应用数据目录保存 DSH 配置、�
 
 ## 支持的平台
 
-DeepSeek Harness Desktop v0.1.5 已提供以下安装包：
+DeepSeek Harness Desktop v0.1.6 已提供以下安装包：
 
 - macOS Apple Silicon；
 - macOS Intel；

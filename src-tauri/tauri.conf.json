@@ -1,13 +1,14 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DeepSeek Harness Desktop",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "identifier": "com.goyac.deepseek-harness-desktop",
   "build": {
     "frontendDist": "../app"
   },
   "app": {
     "withGlobalTauri": true,
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",

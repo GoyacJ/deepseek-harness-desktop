@@ -3,7 +3,8 @@
   "identifier": "startup-page",
   "description": "Permissions for the bundled startup and failure page only.",
   "windows": [
-    "main"
+    "main",
+    "update-toast"
   ],
   "permissions": [
     "core:default"

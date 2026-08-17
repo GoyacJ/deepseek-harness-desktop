@@ -54,13 +54,13 @@ npm run dev
 npm run build
 ```
 
-发行构建会下载并校验 Node.js 22.23.2，在独立目录安装锁定的官方 `@deepseek-ai/dsh@0.1.0-rc.6`，再将两者放入安装包。生成的运行时目录已被 Git 忽略。
+发行构建会下载并校验 Node.js 22.23.2，在独立目录安装锁定的官方 `@deepseek-ai/dsh@0.1.0-rc.6`，再将两者放入安装包。生成的运行时目录已被 Git 忽略。应用菜单可以检查 npm `@deepseek-ai/dsh` 的 `latest` 并安装到用户数据目录，不会改安装包。随包版本可随时恢复。
 
 推送与应用版本一致的标签会触发 GitHub Actions：
 
 ```sh
-git tag v0.1.5
-git push origin v0.1.5
+git tag v0.1.6
+git push origin v0.1.6
 ```
 
 流水线发布 macOS Apple Silicon、macOS Intel、Windows x64 和 Linux x64 安装包。当前安装包没有商业代码签名，macOS Gatekeeper 和 Windows SmartScreen 可能显示未知开发者提示。
@@ -74,5 +74,9 @@ git push origin v0.1.5
 | `DSH_DESKTOP_WORKSPACE` | 覆盖初始 workspace |
 | `DSH_DESKTOP_STARTUP_TIMEOUT_SECS` | 覆盖启动超时 |
 | `DSH_DESKTOP_DISABLE_PLUGIN` | 设为非空值时不加载桌面桥接插件 |
+| `DSH_DESKTOP_NPM` | 指定 `npm` 可执行文件路径 |
+| `DSH_DESKTOP_NPM_REGISTRY` | 覆盖 npm registry，仅使用该地址查询和安装 latest |
+
+应用菜单 **DSH** 提供检查更新、安装并重启、恢复随包版本。官方 Web UI 不能触发这些操作。
 
 架构与发行约束见 [docs/architecture.md](docs/architecture.md)。
