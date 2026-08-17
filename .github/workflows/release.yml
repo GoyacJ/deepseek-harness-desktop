@@ -70,6 +70,33 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libfuse2
 
+      - name: Prepare AppImage bundler tools
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tools="$HOME/.cache/tauri"
+          mkdir -p "$tools"
+          gh release download apprun-old \
+            --repo tauri-apps/binary-releases \
+            --pattern AppRun-x86_64 \
+            --output "$tools/AppRun-x86_64"
+          gh release download linuxdeploy \
+            --repo tauri-apps/binary-releases \
+            --pattern linuxdeploy-x86_64.AppImage \
+            --output "$tools/linuxdeploy-x86_64.AppImage"
+          gh api "repos/tauri-apps/linuxdeploy-plugin-gtk/contents/linuxdeploy-plugin-gtk.sh?ref=master" \
+            --header "Accept: application/vnd.github.raw+json" \
+            > "$tools/linuxdeploy-plugin-gtk.sh"
+          gh api "repos/tauri-apps/linuxdeploy-plugin-gstreamer/contents/linuxdeploy-plugin-gstreamer.sh?ref=master" \
+            --header "Accept: application/vnd.github.raw+json" \
+            > "$tools/linuxdeploy-plugin-gstreamer.sh"
+          gh release download continuous \
+            --repo linuxdeploy/linuxdeploy-plugin-appimage \
+            --pattern linuxdeploy-plugin-appimage-x86_64.AppImage \
+            --output "$tools/linuxdeploy-plugin-appimage.AppImage"
+          chmod +x "$tools"/*
+
       - name: Install desktop dependencies
         run: npm ci
 
