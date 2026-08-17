@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, chmod, copyFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, chmod, copyFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
@@ -151,8 +151,49 @@ async function installDsh() {
   }
 }
 
+async function pruneLinuxMuslNatives() {
+  if (targetKey !== "linux-x64") {
+    return;
+  }
+
+  const nodeModules = path.join(appRoot, "node_modules");
+  const removed = [];
+
+  async function walk(directory) {
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name.includes("musl")) {
+          await rm(fullPath, { recursive: true, force: true });
+          removed.push(fullPath);
+          continue;
+        }
+        await walk(fullPath);
+        continue;
+      }
+      if (entry.isFile() && entry.name.includes("musl")) {
+        await rm(fullPath, { force: true });
+        removed.push(fullPath);
+      }
+    }
+  }
+
+  await walk(nodeModules);
+  for (const item of removed) {
+    console.log(`Removed musl native unused by glibc AppImage: ${path.relative(appRoot, item)}`);
+  }
+}
+
 await rm(runtimeRoot, { recursive: true, force: true });
 await mkdir(temporaryRoot, { recursive: true });
 await Promise.all([installNode(), installDsh()]);
+await pruneLinuxMuslNatives();
 await rm(temporaryRoot, { recursive: true, force: true });
 console.log(`Prepared Node.js ${NODE_VERSION} and @deepseek-ai/dsh ${DSH_VERSION} for ${targetKey}.`);
