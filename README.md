@@ -83,8 +83,8 @@ npm run build
 推送与应用版本一致的标签会触发 GitHub Actions：
 
 ```sh
-git tag v0.1.7
-git push origin v0.1.7
+git tag v0.1.8
+git push origin v0.1.8
 ```
 
 流水线发布 macOS Apple Silicon、macOS Intel、Windows x64 和 Linux x64 安装包，并上传 updater 产物与 `latest.json`。应用内更新使用仓库 updater 密钥验签。当前安装包没有商业代码签名，macOS Gatekeeper 和 Windows SmartScreen 可能显示未知开发者提示。发布前需要配置 GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`（可选 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。
