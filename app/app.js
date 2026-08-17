@@ -37,6 +37,9 @@ function render(snapshot) {
   if (updatePhase === 'switching' || updatePhase === 'rolling_back') {
     title.textContent = updatePhase === 'switching' ? '正在切换 DSH' : '正在回退 DSH'
     retry.hidden = true
+  } else if (updatePhase === 'installing') {
+    title.textContent = '正在安装桌面更新'
+    retry.hidden = true
   } else if (phase === 'failed') {
     title.textContent = 'DSH 启动失败'
     retry.hidden = false

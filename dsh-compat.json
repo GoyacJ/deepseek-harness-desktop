@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "bundled": "0.1.0-rc.6",
+  "releases": [
+    {
+      "version": "0.1.0-rc.6",
+      "minDesktop": "0.1.5",
+      "node": "^22.19.0 || >=24.0.0",
+      "notes": "随安装包交付的版本。",
+      "archives": {}
+    }
+  ]
+}

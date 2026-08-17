@@ -146,6 +146,16 @@ impl RuntimeController {
             .map_err(|_| "DSH 监督器已经停止".to_string())
     }
 
+    pub fn pause(&self) -> Result<(), String> {
+        let (acknowledge, completed) = mpsc::channel();
+        self.commands
+            .send(SupervisorCommand::Pause(acknowledge))
+            .map_err(|_| "DSH 监督器已经停止".to_string())?;
+        completed
+            .recv_timeout(Duration::from_secs(20))
+            .map_err(|_| "停止 DSH 超时".to_string())?
+    }
+
     pub fn set_update_flow(
         &self,
         phase: UpdatePhase,
@@ -162,6 +172,16 @@ impl RuntimeController {
             state.update_message = message.into();
             state.available_version = available_version;
             state.update_steps = steps;
+        });
+    }
+
+    pub fn set_update_progress(&self, read: u64, total: Option<u64>) {
+        update_snapshot(&self.snapshot, |state| {
+            state.update_bytes_read = read;
+            if let Some(total) = total {
+                state.update_bytes_total = total;
+            }
+            state.update_phase = crate::update::UpdatePhase::Downloading;
         });
     }
 
@@ -208,6 +228,7 @@ type SharedSnapshot = Arc<Mutex<RuntimeSnapshot>>;
 
 enum SupervisorCommand {
     Restart,
+    Pause(Sender<Result<(), String>>),
     Shutdown(Sender<()>),
 }
 
@@ -229,7 +250,7 @@ impl LauncherKind {
 }
 
 #[derive(Clone, Debug)]
-struct Launcher {
+pub(crate) struct Launcher {
     program: PathBuf,
     prefix_args: Vec<OsString>,
     environment: Vec<(OsString, OsString)>,
@@ -247,7 +268,7 @@ struct RuntimeConfig {
     dsh_home: PathBuf,
     npm_cache: PathBuf,
     workspace: PathBuf,
-    patch: Option<PathBuf>,
+    patches: Vec<PathBuf>,
     startup_timeout: Duration,
     resource_dir: PathBuf,
     app_data: PathBuf,
@@ -278,10 +299,13 @@ impl RuntimeConfig {
         } else {
             Some(resolve_desktop_plugin(&resource_dir)?)
         };
-        let patch = plugin_path
-            .as_ref()
-            .map(|plugin| write_generated_patch(&dsh_home, plugin, &package_spec))
-            .transpose()?;
+        let mut patches = Vec::new();
+        if let Some(plugin) = &plugin_path {
+            patches.push(write_generated_patch(&dsh_home, plugin, &package_spec)?);
+        }
+        if let Ok(path) = crate::plugin::sync_disable_patch(&dsh_home, &app_data) {
+            patches.push(path);
+        }
         let startup_timeout = env::var("DSH_DESKTOP_STARTUP_TIMEOUT_SECS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
@@ -295,7 +319,7 @@ impl RuntimeConfig {
             dsh_home,
             npm_cache,
             workspace,
-            patch,
+            patches,
             startup_timeout: Duration::from_secs(startup_timeout),
             resource_dir,
             app_data,
@@ -306,9 +330,15 @@ impl RuntimeConfig {
     fn rebind(&mut self) {
         self.launcher = resolve_launcher(&self.resource_dir, &self.app_data, &self.requested_spec);
         self.package_spec = format!("@deepseek-ai/dsh@{}", self.launcher.dsh_version);
-        self.patch = self.plugin_path.as_ref().and_then(|plugin| {
-            write_generated_patch(&self.dsh_home, plugin, &self.package_spec).ok()
-        });
+        self.patches.clear();
+        if let Some(plugin) = &self.plugin_path
+            && let Ok(path) = write_generated_patch(&self.dsh_home, plugin, &self.package_spec)
+        {
+            self.patches.push(path);
+        }
+        if let Ok(path) = crate::plugin::sync_disable_patch(&self.dsh_home, &self.app_data) {
+            self.patches.push(path);
+        }
     }
 
     fn command(&self, port: u16) -> Command {
@@ -317,27 +347,16 @@ impl RuntimeConfig {
             command.arg("--cache").arg(&self.npm_cache);
         }
         command.args(&self.launcher.prefix_args);
-        command.args(dsh_arguments(self.patch.as_deref(), port));
-        command.envs(
-            self.launcher
-                .environment
-                .iter()
-                .map(|(key, value)| (key, value)),
+        command.args(dsh_arguments(&self.patches, port));
+        apply_runtime_process_env(
+            &mut command,
+            &self.launcher,
+            &self.dsh_home,
+            &self.npm_cache,
+            &[],
         );
-        if !self.launcher.uses_npx
-            && let Some(path) = bundled_path_env(&self.launcher.program)
-        {
-            command.env("PATH", path);
-        }
         command
             .current_dir(&self.workspace)
-            .env("DSH_HOME", &self.dsh_home)
-            .env("NPM_CONFIG_CACHE", &self.npm_cache)
-            .env("NPM_CONFIG_AUDIT", "false")
-            .env("NPM_CONFIG_FUND", "false")
-            .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
-            .env("NO_UPDATE_NOTIFIER", "1")
-            .env("DSH_DESKTOP_PARENT_PID", std::process::id().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -367,6 +386,72 @@ pub(crate) fn scoped_runtime_root(base: &Path) -> PathBuf {
     }
 }
 
+pub(crate) fn resolve_current_launcher(resource_dir: &Path, app_data: &Path) -> Launcher {
+    let requested_spec =
+        env::var("DSH_DESKTOP_PACKAGE").unwrap_or_else(|_| OFFICIAL_DSH_PACKAGE.to_string());
+    resolve_launcher(resource_dir, app_data, &requested_spec)
+}
+
+pub(crate) fn dsh_cli_command(
+    launcher: &Launcher,
+    dsh_home: &Path,
+    npm_cache: &Path,
+    extra_path_dirs: &[PathBuf],
+    args: &[OsString],
+) -> Command {
+    let mut command = Command::new(&launcher.program);
+    if launcher.uses_npx {
+        command.arg("--cache").arg(npm_cache);
+    }
+    command.args(&launcher.prefix_args);
+    command.args(args);
+    apply_runtime_process_env(&mut command, launcher, dsh_home, npm_cache, extra_path_dirs);
+    command
+        .current_dir(dsh_home)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn apply_runtime_process_env(
+    command: &mut Command,
+    launcher: &Launcher,
+    dsh_home: &Path,
+    npm_cache: &Path,
+    extra_path_dirs: &[PathBuf],
+) {
+    command.envs(
+        launcher
+            .environment
+            .iter()
+            .map(|(key, value)| (key, value)),
+    );
+    let mut path_dirs = extra_path_dirs.to_vec();
+    if !launcher.uses_npx && let Some(directory) = launcher.program.parent() {
+        path_dirs.push(directory.to_path_buf());
+    }
+    if let Some(current) = env::var_os("PATH") {
+        path_dirs.extend(env::split_paths(&current));
+    }
+    if let Ok(path) = env::join_paths(path_dirs) {
+        command.env("PATH", path);
+    }
+    command
+        .env("DSH_HOME", dsh_home)
+        .env("NPM_CONFIG_CACHE", npm_cache)
+        .env("NPM_CONFIG_AUDIT", "false")
+        .env("NPM_CONFIG_FUND", "false")
+        .env("NPM_CONFIG_UPDATE_NOTIFIER", "false")
+        .env("NO_UPDATE_NOTIFIER", "1")
+        .env("DSH_DESKTOP_PARENT_PID", std::process::id().to_string());
+}
+
+pub(crate) fn bundled_node_executable(resource_dir: &Path) -> Option<PathBuf> {
+    discover_bundled_host(resource_dir).map(|host| host.node)
+}
+
+#[cfg(test)]
 fn bundled_path_env(program: &Path) -> Option<OsString> {
     let node_directory = program.parent()?;
     let mut paths = vec![node_directory.to_path_buf()];
@@ -599,11 +684,11 @@ fn write_generated_patch(
     Ok(patch_path)
 }
 
-fn dsh_arguments(patch: Option<&Path>, port: u16) -> Vec<OsString> {
+fn dsh_arguments(patches: &[impl AsRef<Path>], port: u16) -> Vec<OsString> {
     let mut arguments = vec![OsString::from("web")];
-    if let Some(patch) = patch {
+    for patch in patches {
         arguments.push(OsString::from("--patch"));
-        arguments.push(patch.as_os_str().to_owned());
+        arguments.push(patch.as_ref().as_os_str().to_owned());
     }
     arguments.extend([
         OsString::from("--host"),
@@ -644,12 +729,35 @@ fn supervisor_loop(
                 http_ready_streak = 0;
                 http_response_announced = false;
                 launch_requested = true;
-                let updating = matches!(
-                    lock_snapshot(&snapshot).update_phase,
-                    UpdatePhase::Switching | UpdatePhase::RollingBack
-                );
-                let _ = navigate(&window, landing_url.clone());
-                set_window_visible(&window, updating);
+                let phase = lock_snapshot(&snapshot).update_phase;
+                if !is_plugin_phase(phase) {
+                    let updating =
+                        matches!(phase, UpdatePhase::Switching | UpdatePhase::RollingBack);
+                    let _ = navigate(&window, landing_url.clone());
+                    set_window_visible(&window, updating);
+                }
+            }
+            Ok(SupervisorCommand::Pause(acknowledge)) => {
+                if let Some(mut running) = child.take() {
+                    terminate_process(&mut running);
+                }
+                ready_announced.store(false, Ordering::SeqCst);
+                ready = false;
+                http_ready_streak = 0;
+                http_response_announced = false;
+                launch_requested = false;
+                launched_at = None;
+                update_snapshot(&snapshot, |state| {
+                    state.phase = RuntimePhase::Stopping;
+                    state.message = "正在暂停 DSH 以安装插件。".into();
+                    state.pid = None;
+                    state.url = None;
+                });
+                if !is_plugin_phase(lock_snapshot(&snapshot).update_phase) {
+                    let _ = navigate(&window, landing_url.clone());
+                    set_window_visible(&window, true);
+                }
+                let _ = acknowledge.send(Ok(()));
             }
             Ok(SupervisorCommand::Shutdown(acknowledge)) => {
                 update_snapshot(&snapshot, |state| {
@@ -816,15 +924,17 @@ fn supervisor_loop(
                 state.url = Some(url.clone());
                 if matches!(
                     state.update_phase,
-                    UpdatePhase::Switching | UpdatePhase::RollingBack
+                    UpdatePhase::Switching
+                        | UpdatePhase::RollingBack
+                        | UpdatePhase::PluginInstalling
+                        | UpdatePhase::PluginRemoving
+                        | UpdatePhase::PluginToggling
                 ) {
+                    let plugin = is_plugin_phase(state.update_phase);
                     state.update_phase = UpdatePhase::Idle;
-                    state.update_message = format!("当前 DSH {}", state.dsh_version);
-                    state.available_version = None;
-                    for step in &mut state.update_steps {
-                        if step.status == StepStatus::Active {
-                            step.status = StepStatus::Done;
-                        }
+                    if !plugin {
+                        state.update_message = format!("当前 DSH {}", state.dsh_version);
+                        state.available_version = None;
                     }
                     for step in &mut state.update_steps {
                         if step.status == StepStatus::Active {
@@ -1013,6 +1123,13 @@ fn terminate_process(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn is_plugin_phase(phase: UpdatePhase) -> bool {
+    matches!(
+        phase,
+        UpdatePhase::PluginInstalling | UpdatePhase::PluginRemoving | UpdatePhase::PluginToggling
+    )
+}
+
 fn navigate(window: &WebviewWindow, url: Url) -> Result<(), String> {
     let window_for_navigation = window.clone();
     let (result_sender, result_receiver) = mpsc::sync_channel(1);
@@ -1089,7 +1206,7 @@ mod tests {
 
     #[test]
     fn dsh_arguments_keep_launcher_flags_before_web_flags() {
-        let arguments = dsh_arguments(Some(Path::new("/tmp/desktop patch.yml")), 43123);
+        let arguments = dsh_arguments(&[Path::new("/tmp/desktop patch.yml")], 43123);
         let actual = arguments
             .iter()
             .map(|value| value.to_string_lossy().into_owned())
@@ -1100,6 +1217,35 @@ mod tests {
                 "web",
                 "--patch",
                 "/tmp/desktop patch.yml",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "43123",
+            ]
+        );
+    }
+
+    #[test]
+    fn dsh_arguments_stack_user_plugin_overlay_after_generated_patch() {
+        let arguments = dsh_arguments(
+            &[
+                Path::new("/tmp/desktop.generated.patch.yml"),
+                Path::new("/tmp/desktop.user-plugins.patch.yml"),
+            ],
+            43123,
+        );
+        let actual = arguments
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                "web",
+                "--patch",
+                "/tmp/desktop.generated.patch.yml",
+                "--patch",
+                "/tmp/desktop.user-plugins.patch.yml",
                 "--host",
                 "127.0.0.1",
                 "--port",
@@ -1169,7 +1315,7 @@ mod tests {
     #[test]
     fn os_string_arguments_preserve_non_utf8_compatible_shape() {
         let patch = Path::new(std::ffi::OsStr::new("desktop.cordis.patch.yml"));
-        let arguments = dsh_arguments(Some(patch), 3080);
+        let arguments = dsh_arguments(&[patch], 3080);
         assert_eq!(arguments[2], patch.as_os_str());
     }
 

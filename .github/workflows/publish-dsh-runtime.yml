@@ -1,0 +1,148 @@
+name: Publish verified DSH runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      dsh_version:
+        description: Official @deepseek-ai/dsh version, for example 0.1.0-rc.7
+        required: true
+        type: string
+      min_desktop:
+        description: Minimum desktop version allowed to install this sidecar
+        required: true
+        default: "0.1.5"
+        type: string
+      node_range:
+        description: Node version range required by this DSH release
+        required: true
+        default: "^22.19.0 || >=24.0.0"
+        type: string
+      notes:
+        description: Optional notes shown in the compatibility index
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    name: Prepare immutable DSH runtime release
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Create versioned release if needed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DSH_VERSION: ${{ inputs.dsh_version }}
+        run: |
+          if gh release view "dsh-${DSH_VERSION}" >/dev/null 2>&1; then
+            echo "Release dsh-${DSH_VERSION} already exists"
+          else
+            gh release create "dsh-${DSH_VERSION}" \
+              --title "DSH ${DSH_VERSION} runtime" \
+              --notes "Verified sidecar runtime for DeepSeek Harness Desktop. This release is immutable." \
+              --target "${GITHUB_SHA}"
+          fi
+
+  pack:
+    name: ${{ matrix.name }}
+    needs: prepare-release
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            runner: macos-15
+            runtimeTarget: darwin-arm64
+          - name: macOS Intel
+            runner: macos-15
+            runtimeTarget: darwin-x64
+          - name: Windows x64
+            runner: windows-2022
+            runtimeTarget: win32-x64
+          - name: Linux x64
+            runner: ubuntu-22.04
+            runtimeTarget: linux-x64
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+
+      - name: Pack verified DSH app tree
+        run: npm run pack:dsh-runtime
+        env:
+          DSH_VERSION: ${{ inputs.dsh_version }}
+          DSH_DESKTOP_RUNTIME_TARGET: ${{ matrix.runtimeTarget }}
+
+      - name: Upload runtime archive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DSH_VERSION: ${{ inputs.dsh_version }}
+        run: |
+          gh release upload "dsh-${DSH_VERSION}" \
+            dist/dsh-runtime/dsh-${DSH_VERSION}-${{ matrix.runtimeTarget }}.tar.gz \
+            dist/dsh-runtime/dsh-${DSH_VERSION}-${{ matrix.runtimeTarget }}.tar.gz.sha256 \
+            --clobber
+
+  finalize:
+    name: Update compatibility index
+    needs: pack
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22.23.2
+          package-manager-cache: false
+
+      - name: Download checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DSH_VERSION: ${{ inputs.dsh_version }}
+        run: |
+          mkdir -p checksums
+          gh release download "dsh-${DSH_VERSION}" --pattern "*.sha256" --dir checksums
+
+      - name: Fetch existing compatibility index
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view dsh-compat >/dev/null 2>&1; then
+            gh release download dsh-compat --pattern dsh-compat.json --dir . || true
+          else
+            gh release create dsh-compat \
+              --title "DSH compatibility index" \
+              --notes "Mutable index of desktop-verified DSH sidecar runtimes." \
+              --target "${GITHUB_SHA}"
+          fi
+
+      - name: Merge compatibility index
+        run: npm run update:dsh-compat
+        env:
+          DSH_VERSION: ${{ inputs.dsh_version }}
+          DSH_MIN_DESKTOP: ${{ inputs.min_desktop }}
+          DSH_NODE_RANGE: ${{ inputs.node_range }}
+          DSH_COMPAT_NOTES: ${{ inputs.notes }}
+          DSH_BUNDLED_VERSION: "0.1.0-rc.6"
+          DSH_CHECKSUM_DIR: checksums
+          DSH_COMPAT_EXISTING: dsh-compat.json
+          DSH_COMPAT_OUTPUT: dsh-compat.json
+
+      - name: Publish compatibility index
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view dsh-compat >/dev/null 2>&1; then
+            gh release create dsh-compat \
+              --title "DSH compatibility index" \
+              --notes "Mutable index of desktop-verified DSH sidecar runtimes." \
+              --target "${GITHUB_SHA}"
+          fi
+          gh release upload dsh-compat dsh-compat.json --clobber

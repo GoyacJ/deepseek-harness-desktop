@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>插件管理</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent !important;
+        color-scheme: none !important;
+      }
+    </style>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="toast-page plugin-page">
+    <section class="plugin-card plugin-manager" aria-labelledby="plugin-title">
+      <header class="plugin-head">
+        <div>
+          <h1 id="plugin-title" class="plugin-title">插件管理</h1>
+          <p class="plugin-subtitle">管理当前 Web 环境使用的扩展能力</p>
+        </div>
+        <button id="done" class="plugin-close" type="button" aria-label="关闭">
+          <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+            <path
+              d="M1.5 1.5l9 9M10.5 1.5l-9 9"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.6"
+              stroke-linecap="round"
+            />
+          </svg>
+        </button>
+      </header>
+      <div class="plugin-notice" role="note">
+        <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+          <circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" />
+          <path d="M8 7.1v4M8 4.7v.1" stroke="currentColor" stroke-linecap="round" />
+        </svg>
+        <span>插件变更后 DSH 会自动重启，进行中的会话将中断。</span>
+      </div>
+      <nav class="plugin-tabs" aria-label="插件管理分页">
+        <button
+          class="plugin-tab active"
+          type="button"
+          data-tab="installed"
+          aria-controls="installed-pane"
+          aria-selected="true"
+        >
+          已安装
+          <span id="installed-count" class="plugin-count">0</span>
+        </button>
+        <button
+          class="plugin-tab"
+          type="button"
+          data-tab="market"
+          aria-controls="market-pane"
+          aria-selected="false"
+        >
+          插件市场
+        </button>
+      </nav>
+      <div id="installed-pane" class="plugin-pane">
+        <form id="form" class="plugin-install">
+          <label class="plugin-field-label" for="spec">从 npm 安装</label>
+          <div class="plugin-field">
+            <span class="plugin-field-prefix" aria-hidden="true">npm</span>
+            <input
+              id="spec"
+              class="plugin-input"
+              name="spec"
+              type="text"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="@scope/dsh-plugin"
+              aria-describedby="npm-hint error"
+            />
+            <button id="submit" class="plugin-field-action" type="submit">安装</button>
+          </div>
+          <div class="plugin-field-foot">
+            <p id="npm-hint" class="plugin-hint">仅安装你信任的包</p>
+            <p id="error" class="plugin-error" hidden></p>
+          </div>
+        </form>
+        <div class="plugin-installed plugin-surface">
+          <div class="plugin-section-head">
+            <p class="plugin-section-title">当前插件</p>
+          </div>
+          <div id="plugin-list" class="plugin-list"></div>
+          <div id="plugin-empty" class="plugin-empty">
+            <span class="plugin-empty-mark" aria-hidden="true">+</span>
+            <p>还没有自行安装的插件</p>
+            <span>可从插件市场选择，或输入 npm 包名安装。</span>
+          </div>
+        </div>
+      </div>
+      <div id="market-pane" class="plugin-pane" hidden>
+        <div class="plugin-market-tools">
+          <label class="plugin-field plugin-search">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+              <circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" />
+              <path d="m10.5 10.5 3 3" stroke="currentColor" stroke-linecap="round" />
+            </svg>
+            <input
+              id="market-query"
+              class="plugin-input"
+              type="search"
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="搜索插件名称或功能"
+              aria-label="搜索插件"
+            />
+          </label>
+          <div class="plugin-sort" role="radiogroup" aria-label="排序">
+            <button class="plugin-sort-btn active" type="button" data-sort="trending">趋势</button>
+            <button class="plugin-sort-btn" type="button" data-sort="stars">Star</button>
+          </div>
+        </div>
+        <div id="market-chips" class="plugin-chips" role="tablist" aria-label="分类">
+          <button class="plugin-chip active" type="button" data-category="">全部</button>
+          <button class="plugin-chip" type="button" data-category="通信">通信</button>
+          <button class="plugin-chip" type="button" data-category="开发工具">开发工具</button>
+          <button class="plugin-chip" type="button" data-category="智能体">智能体</button>
+          <button class="plugin-chip" type="button" data-category="搜索与知识">搜索与知识</button>
+          <button class="plugin-chip" type="button" data-category="界面">界面</button>
+          <button class="plugin-chip" type="button" data-category="记忆">记忆</button>
+          <button class="plugin-chip" type="button" data-category="数据分析">数据分析</button>
+          <button class="plugin-chip" type="button" data-category="安全">安全</button>
+          <button class="plugin-chip" type="button" data-category="其他">其他</button>
+        </div>
+        <div class="plugin-list-wrap plugin-surface">
+          <div id="market-list" class="plugin-list"></div>
+          <div id="market-state" class="plugin-state" hidden>
+            <p id="market-status"></p>
+            <button id="market-retry" class="plugin-button" type="button" hidden>重试</button>
+          </div>
+        </div>
+        <p class="plugin-footnote">数据来自 dsh-hub.cc 社区索引，安装前请确认来源可信。</p>
+      </div>
+      <div id="confirm" class="plugin-confirm" hidden>
+        <button id="confirm-dismiss" class="plugin-confirm-backdrop" type="button" aria-label="取消"></button>
+        <div class="plugin-confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+          <button id="confirm-close" class="plugin-close" type="button" aria-label="关闭">
+            <svg viewBox="0 0 12 12" width="10" height="10" aria-hidden="true">
+              <path
+                d="M1.5 1.5l9 9M10.5 1.5l-9 9"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <span id="confirm-icon" class="plugin-confirm-icon" aria-hidden="true">!</span>
+          <p id="confirm-title" class="plugin-confirm-title"></p>
+          <p id="confirm-message" class="plugin-confirm-message"></p>
+          <div class="plugin-confirm-actions">
+            <button id="confirm-cancel" class="plugin-button" type="button">取消</button>
+            <button id="confirm-ok" class="plugin-button plugin-button-primary" type="button">确定</button>
+          </div>
+        </div>
+      </div>
+    </section>
+    <script src="./plugin.js"></script>
+  </body>
+</html>

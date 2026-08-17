@@ -20,14 +20,16 @@ use tauri::{
     menu::MenuItem, webview::Color, Wry,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+use tauri_plugin_updater::UpdaterExt;
 
 const OFFICIAL_DSH_NAME: &str = "@deepseek-ai/dsh";
 const DEFAULT_NPM_REGISTRY: &str = "https://registry.npmjs.org";
 const NPM_MIRROR_REGISTRY: &str = "https://registry.npmmirror.com";
 const JSON_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const DESKTOP_UPDATE_TIMEOUT: Duration = Duration::from_secs(12);
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum UpdatePhase {
     Idle,
@@ -39,6 +41,10 @@ pub enum UpdatePhase {
     Switching,
     RollingBack,
     Failed,
+    PluginInstalling,
+    PluginRemoving,
+    PluginToggling,
+    Installing,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -123,11 +129,16 @@ pub enum UpdateCheck {
 
 pub struct UpdateCoordinator {
     pending: Mutex<Option<SelectedRelease>>,
+    pending_desktop: Mutex<Option<String>>,
     busy: AtomicBool,
     current_item: MenuItem<Wry>,
     check_item: MenuItem<Wry>,
     install_item: MenuItem<Wry>,
     restore_item: MenuItem<Wry>,
+    plugins_item: MenuItem<Wry>,
+    desktop_current_item: MenuItem<Wry>,
+    desktop_check_item: MenuItem<Wry>,
+    desktop_install_item: MenuItem<Wry>,
 }
 
 impl UpdateCoordinator {
@@ -136,24 +147,37 @@ impl UpdateCoordinator {
         check_item: MenuItem<Wry>,
         install_item: MenuItem<Wry>,
         restore_item: MenuItem<Wry>,
+        plugins_item: MenuItem<Wry>,
+        desktop_current_item: MenuItem<Wry>,
+        desktop_check_item: MenuItem<Wry>,
+        desktop_install_item: MenuItem<Wry>,
     ) -> Self {
         Self {
             pending: Mutex::new(None),
+            pending_desktop: Mutex::new(None),
             busy: AtomicBool::new(false),
             current_item,
             check_item,
             install_item,
             restore_item,
+            plugins_item,
+            desktop_current_item,
+            desktop_check_item,
+            desktop_install_item,
         }
     }
 
-    fn try_begin(&self) -> bool {
+    pub(crate) fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn try_begin(&self) -> bool {
         self.busy
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
-    fn finish(&self) {
+    pub(crate) fn finish(&self) {
         self.busy.store(false, Ordering::SeqCst);
     }
 }
@@ -260,7 +284,7 @@ fn select_npm_update(
     }
     if !node_supported(node_version, latest.node.as_deref()) {
         return UpdateCheck::NeedsDesktop(format!(
-            "npm latest DSH {} 需要 Node {}，当前随包 Node 为 {}",
+            "npm latest DSH {} 需要 Node {}，当前随包 Node 为 {}。请先用菜单「检查桌面更新」。",
             latest.version,
             latest.node.as_deref().unwrap_or("未知"),
             node_version
@@ -286,6 +310,15 @@ pub fn handle_menu_event(app: &AppHandle, id: &str) {
             let app = app.clone();
             std::thread::spawn(move || confirm_and_restore(&app));
         }
+        "dsh-plugins" => crate::plugin::open_manager(app),
+        "desktop-check" => {
+            let app = app.clone();
+            std::thread::spawn(move || check_desktop_update(&app));
+        }
+        "desktop-install" => {
+            let app = app.clone();
+            std::thread::spawn(move || confirm_and_install_desktop(&app));
+        }
         _ => {}
     }
 }
@@ -298,18 +331,21 @@ pub fn refresh_menu(app: &AppHandle) {
     let snapshot = app.state::<RuntimeController>().status();
     let state = load_runtime_state(&app_data);
     let busy = coordinator.busy.load(Ordering::SeqCst);
+    let dsh_pending = lock_pending(&coordinator).is_some();
+    let desktop_pending = lock_pending_desktop(&coordinator).is_some();
     let _ = coordinator
         .current_item
         .set_text(format!("当前 DSH {}", snapshot.dsh_version));
+    let _ = coordinator
+        .desktop_current_item
+        .set_text(format!("当前桌面 {}", env!("CARGO_PKG_VERSION")));
     let _ = coordinator.check_item.set_enabled(!busy);
-    let _ = coordinator.install_item.set_enabled(
-        !busy
-            && snapshot.available_version.is_some()
-            && matches!(
-                snapshot.update_phase,
-                UpdatePhase::Available | UpdatePhase::Failed
-            ),
-    );
+    let _ = coordinator.plugins_item.set_enabled(!busy);
+    let _ = coordinator.install_item.set_enabled(!busy && dsh_pending);
+    let _ = coordinator.desktop_check_item.set_enabled(!busy);
+    let _ = coordinator
+        .desktop_install_item
+        .set_enabled(!busy && desktop_pending);
     let _ = coordinator
         .restore_item
         .set_enabled(!busy && state.source == RuntimeSource::Sidecar);
@@ -641,6 +677,374 @@ fn restore_bundled(app: &AppHandle) {
     }
 }
 
+fn check_desktop_update(app: &AppHandle) {
+    let coordinator = app.state::<UpdateCoordinator>();
+    if !coordinator.try_begin() {
+        return;
+    }
+    refresh_menu(app);
+    let controller = app.state::<RuntimeController>();
+    let current = env!("CARGO_PKG_VERSION");
+    let mut steps = flow_from(&["连接发布源", "读取版本", "对比", "结果"]);
+    set_step(&mut steps, 0, StepStatus::Active, "正在连接 GitHub Releases");
+    report(
+        app,
+        &controller,
+        UpdatePhase::Checking,
+        "正在检查桌面更新。",
+        None,
+        &steps,
+    );
+
+    let result = tauri::async_runtime::block_on(async {
+        desktop_updater(app)?
+            .check()
+            .await
+            .map_err(classify_desktop_update_error)
+    });
+
+    match result {
+        Ok(None) => {
+            *lock_pending_desktop(&coordinator) = None;
+            let message = format!("当前已是最新桌面版本（{current}）。");
+            set_step(&mut steps, 0, StepStatus::Done, "GitHub Releases");
+            set_step(&mut steps, 1, StepStatus::Done, format!("桌面 {current}"));
+            set_step(&mut steps, 2, StepStatus::Done, format!("当前桌面 {current}"));
+            set_step(&mut steps, 3, StepStatus::Done, message.clone());
+            report(app, &controller, UpdatePhase::Idle, message, None, &steps);
+        }
+        Ok(Some(update)) => {
+            let version = update.version.clone();
+            *lock_pending_desktop(&coordinator) = Some(version.clone());
+            set_step(&mut steps, 0, StepStatus::Done, "GitHub Releases");
+            set_step(&mut steps, 1, StepStatus::Done, format!("桌面 {version}"));
+            set_step(&mut steps, 2, StepStatus::Done, format!("当前桌面 {current}"));
+            set_step(&mut steps, 3, StepStatus::Done, format!("可安装 {version}"));
+            report(
+                app,
+                &controller,
+                UpdatePhase::Available,
+                format!("发现桌面 {version}。可在菜单中安装并重启，进行中的会话会中断。"),
+                Some(version),
+                &steps,
+            );
+        }
+        Err(error) => {
+            set_step(&mut steps, 3, StepStatus::Failed, error.clone());
+            fail_remaining(&mut steps);
+            report(app, &controller, UpdatePhase::Failed, error, None, &steps);
+        }
+    }
+
+    coordinator.finish();
+    refresh_menu(app);
+}
+
+fn confirm_and_install_desktop(app: &AppHandle) {
+    let coordinator = app.state::<UpdateCoordinator>();
+    let Some(version) = lock_pending_desktop(&coordinator).clone() else {
+        return;
+    };
+    let confirmed = app
+        .dialog()
+        .message(format!(
+            "将安装桌面 {version} 并重启应用。进行中的会话会中断。"
+        ))
+        .title("安装桌面更新")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancel)
+        .blocking_show();
+    if !confirmed {
+        return;
+    }
+    apply_desktop_update(app, &version);
+}
+
+fn apply_desktop_update(app: &AppHandle, expected: &str) {
+    let coordinator = app.state::<UpdateCoordinator>();
+    if !coordinator.try_begin() {
+        return;
+    }
+    refresh_menu(app);
+    let controller = app.state::<RuntimeController>();
+    let mut steps = flow_from(&["下载", "安装", "重启"]);
+    set_step(
+        &mut steps,
+        0,
+        StepStatus::Active,
+        format!("桌面 {expected}"),
+    );
+    report(
+        app,
+        &controller,
+        UpdatePhase::Downloading,
+        format!("正在下载桌面 {expected}。"),
+        Some(expected.to_string()),
+        &steps,
+    );
+
+    let result = tauri::async_runtime::block_on({
+        let app = app.clone();
+        let expected = expected.to_string();
+        async move {
+            let Some(update) = desktop_updater(&app)?
+                .check()
+                .await
+                .map_err(classify_desktop_update_error)?
+            else {
+                return Err("没有可安装的桌面更新。".into());
+            };
+            if update.version != expected {
+                return Err(format!(
+                    "发布源版本已变为 {}，期望 {expected}。请重新检查。",
+                    update.version
+                ));
+            }
+            let mut read = 0u64;
+            let progress_app = app.clone();
+            let finish_app = app.clone();
+            let finish_version = expected.clone();
+            update
+                .download_and_install(
+                    move |chunk, total| {
+                        read += chunk as u64;
+                        progress_app
+                            .state::<RuntimeController>()
+                            .set_update_progress(read, total);
+                        sync_update_toast(&progress_app);
+                    },
+                    move || {
+                        let controller = finish_app.state::<RuntimeController>();
+                        let steps = vec![
+                            UpdateStep {
+                                label: "下载".into(),
+                                status: StepStatus::Done,
+                                detail: "下载完成".into(),
+                            },
+                            UpdateStep {
+                                label: "安装".into(),
+                                status: StepStatus::Active,
+                                detail: "正在安装".into(),
+                            },
+                            UpdateStep {
+                                label: "重启".into(),
+                                status: StepStatus::Pending,
+                                detail: String::new(),
+                            },
+                        ];
+                        report(
+                            &finish_app,
+                            &controller,
+                            UpdatePhase::Installing,
+                            format!("正在安装桌面 {finish_version}。"),
+                            Some(finish_version),
+                            &steps,
+                        );
+                    },
+                )
+                .await
+                .map_err(classify_desktop_update_error)
+        }
+    });
+
+    match result {
+        Ok(()) => {
+            set_step(&mut steps, 0, StepStatus::Done, "下载完成");
+            set_step(&mut steps, 1, StepStatus::Done, "已安装");
+            set_step(&mut steps, 2, StepStatus::Active, "正在重启应用");
+            report(
+                app,
+                &controller,
+                UpdatePhase::Installing,
+                format!("正在重启到桌面 {expected}。"),
+                Some(expected.to_string()),
+                &steps,
+            );
+            coordinator.finish();
+            refresh_menu(app);
+            app.restart();
+        }
+        Err(error) => {
+            set_step(&mut steps, 2, StepStatus::Failed, error.clone());
+            fail_remaining(&mut steps);
+            report(
+                app,
+                &controller,
+                UpdatePhase::Failed,
+                error,
+                Some(expected.to_string()),
+                &steps,
+            );
+            coordinator.finish();
+            refresh_menu(app);
+        }
+    }
+}
+
+fn desktop_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let handle = app.clone();
+    let mut builder = app
+        .updater_builder()
+        .timeout(DESKTOP_UPDATE_TIMEOUT)
+        .on_before_exit(move || {
+            if let Some(controller) = handle.try_state::<RuntimeController>() {
+                controller.shutdown();
+            }
+            handle.cleanup_before_exit();
+        });
+    if let Some(proxy) = desktop_update_proxy()? {
+        builder = builder.proxy(proxy);
+    }
+    builder.build().map_err(classify_desktop_update_error)
+}
+
+fn desktop_update_proxy() -> Result<Option<tauri::Url>, String> {
+    let Some(raw) = desktop_update_proxy_raw() else {
+        return Ok(None);
+    };
+    tauri::Url::parse(&raw)
+        .map(Some)
+        .map_err(|error| format!("桌面更新代理地址无效（{raw}）：{error}"))
+}
+
+fn desktop_update_proxy_raw() -> Option<String> {
+    env_proxy_raw().or_else(system_proxy_raw)
+}
+
+fn env_proxy_raw() -> Option<String> {
+    const KEYS: &[&str] = &[
+        "DSH_DESKTOP_UPDATE_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "HTTP_PROXY",
+        "http_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ];
+    KEYS.iter().find_map(|key| {
+        std::env::var(key)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn system_proxy_raw() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(proxy) = macos_scutil_web_proxy() {
+            return Some(proxy);
+        }
+    }
+
+    let proxy = sysproxy::Sysproxy::get_system_proxy().ok()?;
+    if !proxy.enable {
+        return None;
+    }
+    let host = proxy.host.trim();
+    if host.is_empty() || proxy.port == 0 {
+        return None;
+    }
+    Some(format!("http://{host}:{}", proxy.port))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_scutil_web_proxy() -> Option<String> {
+    let output = Command::new("scutil").arg("--proxy").output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    proxy_url_from_scutil(&text)
+}
+
+#[cfg(target_os = "macos")]
+fn proxy_url_from_scutil(text: &str) -> Option<String> {
+    let https = scutil_enabled_proxy(text, "HTTPS");
+    let http = scutil_enabled_proxy(text, "HTTP");
+    https.or(http).map(|(host, port)| format!("http://{host}:{port}"))
+}
+
+#[cfg(target_os = "macos")]
+fn scutil_enabled_proxy(text: &str, kind: &str) -> Option<(String, u16)> {
+    let enable_key = format!("{kind}Enable");
+    let host_key = format!("{kind}Proxy");
+    let port_key = format!("{kind}Port");
+    if scutil_bool(text, &enable_key) != Some(true) {
+        return None;
+    }
+    let host = scutil_string(text, &host_key)?;
+    let port = scutil_u16(text, &port_key)?;
+    if host.is_empty() || port == 0 {
+        return None;
+    }
+    Some((host, port))
+}
+
+#[cfg(target_os = "macos")]
+fn scutil_bool(text: &str, key: &str) -> Option<bool> {
+    let value = scutil_value(text, key)?;
+    match value.as_str() {
+        "1" | "true" | "True" | "YES" | "Yes" => Some(true),
+        "0" | "false" | "False" | "NO" | "No" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn scutil_string(text: &str, key: &str) -> Option<String> {
+    scutil_value(text, key).filter(|value| !value.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn scutil_u16(text: &str, key: &str) -> Option<u16> {
+    scutil_value(text, key)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn scutil_value(text: &str, key: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim() == key {
+            let value = value.trim();
+            if value.is_empty() {
+                return None;
+            }
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn classify_desktop_update_error(error: tauri_plugin_updater::Error) -> String {
+    match error {
+        tauri_plugin_updater::Error::ReleaseNotFound => {
+            "还没有桌面更新清单。需要先发布带 updater 产物的桌面版本。".into()
+        }
+        tauri_plugin_updater::Error::TargetNotFound(_)
+        | tauri_plugin_updater::Error::TargetsNotFound(_) => {
+            "当前平台还没有对应的桌面更新包。".into()
+        }
+        other => {
+            let text = other.to_string();
+            let lower = text.to_ascii_lowercase();
+            if lower.contains("404") {
+                "还没有桌面更新清单。需要先发布带 updater 产物的桌面版本。".into()
+            } else if lower.contains("timed out")
+                || lower.contains("timeout")
+                || lower.contains("error sending request")
+            {
+                "连接 GitHub Releases 超时。已尝试系统代理；仍失败可设 DSH_DESKTOP_UPDATE_PROXY，并确认 release 已上传 latest.json。".into()
+            } else {
+                format!("桌面更新失败：{}", classify_fetch_error(&text))
+            }
+        }
+    }
+}
+
 pub fn prune_sidecars(app_data: &Path, state: &RuntimeState) -> Result<(), String> {
     let root = sidecar_root(app_data);
     let Ok(entries) = fs::read_dir(&root) else {
@@ -881,7 +1285,7 @@ fn classify_fetch_error(error: &str) -> String {
     }
 }
 
-fn flow_from(labels: &[&str]) -> Vec<UpdateStep> {
+pub(crate) fn flow_from(labels: &[&str]) -> Vec<UpdateStep> {
     labels
         .iter()
         .map(|label| UpdateStep {
@@ -892,14 +1296,14 @@ fn flow_from(labels: &[&str]) -> Vec<UpdateStep> {
         .collect()
 }
 
-fn set_step(steps: &mut [UpdateStep], index: usize, status: StepStatus, detail: impl Into<String>) {
+pub(crate) fn set_step(steps: &mut [UpdateStep], index: usize, status: StepStatus, detail: impl Into<String>) {
     if let Some(step) = steps.get_mut(index) {
         step.status = status;
         step.detail = detail.into();
     }
 }
 
-fn fail_remaining(steps: &mut [UpdateStep]) {
+pub(crate) fn fail_remaining(steps: &mut [UpdateStep]) {
     for step in steps {
         if step.status == StepStatus::Pending {
             step.status = StepStatus::Skipped;
@@ -910,7 +1314,7 @@ fn fail_remaining(steps: &mut [UpdateStep]) {
     }
 }
 
-fn report(
+pub(crate) fn report(
     app: &AppHandle,
     controller: &RuntimeController,
     phase: UpdatePhase,
@@ -951,7 +1355,7 @@ pub fn create_update_toast(app: &tauri::App) -> tauri::Result<()> {
     }
     let toast = builder.build()?;
     #[cfg(target_os = "macos")]
-    clip_toast_corners(&toast);
+    clip_rounded_window(&toast, TOAST_RADIUS);
     let handle = app.handle().clone();
     if let Some(main) = app.get_webview_window("main") {
         main.on_window_event(move |event| {
@@ -970,8 +1374,8 @@ pub fn create_update_toast(app: &tauri::App) -> tauri::Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn clip_toast_corners(toast: &WebviewWindow) {
-    let _ = toast.with_webview(|webview| unsafe {
+pub(crate) fn clip_rounded_window(window: &WebviewWindow, radius: f64) {
+    let _ = window.with_webview(move |webview| unsafe {
         use objc2::runtime::{AnyObject, Bool};
         use objc2::{class, msg_send};
 
@@ -1003,7 +1407,7 @@ fn clip_toast_corners(toast: &WebviewWindow) {
         let cg_clear: *mut AnyObject = msg_send![clear, CGColor];
         let _: () = msg_send![layer, setOpaque: Bool::NO];
         let _: () = msg_send![layer, setBackgroundColor: cg_clear];
-        let _: () = msg_send![layer, setCornerRadius: TOAST_RADIUS];
+        let _: () = msg_send![layer, setCornerRadius: radius];
         let _: () = msg_send![layer, setMasksToBounds: Bool::YES];
     });
 }
@@ -1049,6 +1453,10 @@ fn toast_is_busy(snapshot: &crate::runtime::RuntimeSnapshot) -> bool {
             | UpdatePhase::Staging
             | UpdatePhase::Switching
             | UpdatePhase::RollingBack
+            | UpdatePhase::PluginInstalling
+            | UpdatePhase::PluginRemoving
+            | UpdatePhase::PluginToggling
+            | UpdatePhase::Installing
     )
 }
 
@@ -1077,7 +1485,7 @@ fn position_update_toast(app: &AppHandle, toast: &WebviewWindow) {
     ));
 }
 
-fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+pub(crate) fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(scoped_runtime_root(
         &app.path()
             .app_data_dir()
@@ -1088,6 +1496,13 @@ fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
 fn lock_pending(coordinator: &UpdateCoordinator) -> std::sync::MutexGuard<'_, Option<SelectedRelease>> {
     coordinator
         .pending
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_pending_desktop(coordinator: &UpdateCoordinator) -> std::sync::MutexGuard<'_, Option<String>> {
+    coordinator
+        .pending_desktop
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -1256,9 +1671,94 @@ mod tests {
             UpdateCheck::NeedsDesktop(message) => {
                 assert!(message.contains("0.1.0-rc.7"));
                 assert!(message.contains("22.23.2"));
+                assert!(message.contains("检查桌面更新"));
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn desktop_update_errors_are_actionable() {
+        assert_eq!(
+            classify_desktop_update_error(tauri_plugin_updater::Error::ReleaseNotFound),
+            "还没有桌面更新清单。需要先发布带 updater 产物的桌面版本。"
+        );
+        assert!(classify_desktop_update_error(tauri_plugin_updater::Error::TargetNotFound(
+            "darwin-aarch64".into()
+        ))
+        .contains("当前平台"));
+        assert!(classify_desktop_update_error(tauri_plugin_updater::Error::Network(
+            "error sending request for url: timed out".into()
+        ))
+        .contains("系统代理"));
+    }
+
+    #[test]
+    fn desktop_update_proxy_rejects_invalid_urls() {
+        let error = tauri::Url::parse("not a proxy")
+            .map_err(|error| format!("桌面更新代理地址无效（not a proxy）：{error}"))
+            .unwrap_err();
+        assert!(error.contains("无效"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scutil_prefers_https_web_proxy() {
+        let text = r#"
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 1
+  HTTPSPort : 10808
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 10808
+  SOCKSProxy : 127.0.0.1
+}
+"#;
+        assert_eq!(
+            proxy_url_from_scutil(text).as_deref(),
+            Some("http://127.0.0.1:10808")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scutil_falls_back_to_http_web_proxy() {
+        let text = r#"
+<dictionary> {
+  HTTPEnable : 1
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 0
+  HTTPSPort : 0
+  HTTPSProxy :
+}
+"#;
+        assert_eq!(
+            proxy_url_from_scutil(text).as_deref(),
+            Some("http://127.0.0.1:7890")
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn scutil_ignores_disabled_web_proxy() {
+        let text = r#"
+<dictionary> {
+  HTTPEnable : 0
+  HTTPPort : 7890
+  HTTPProxy : 127.0.0.1
+  HTTPSEnable : 0
+  HTTPSPort : 7890
+  HTTPSProxy : 127.0.0.1
+  SOCKSEnable : 1
+  SOCKSPort : 10808
+  SOCKSProxy : 127.0.0.1
+}
+"#;
+        assert_eq!(proxy_url_from_scutil(text), None);
     }
 
     #[test]

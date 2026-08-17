@@ -43,7 +43,7 @@ jobs:
             runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             runtimeTarget: linux-x64
-            bundles: deb
+            bundles: deb,appimage
 
     steps:
       - uses: actions/checkout@v6
@@ -62,7 +62,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils libfuse2
 
       - name: Install desktop dependencies
         run: npm ci
@@ -76,17 +76,21 @@ jobs:
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: v__VERSION__
-          releaseName: DeepSeek Harness Desktop v__VERSION__
+          releaseName: dsh-dk v__VERSION__
           releaseBody: |
             桌面预览版本。安装包已内置 Node.js 22.23.2 和官方 @deepseek-ai/dsh@0.1.0-rc.6。
 
             macOS 安装包未做 Apple Developer ID 签名。Windows 安装包未做代码签名。
+            已包含应用内桌面更新产物。已安装本版本的用户可从应用菜单检查后续桌面更新。
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
           uploadWorkflowArtifacts: true
+          updaterJsonPreferNsis: true
           retryAttempts: 1
           releaseAssetNamePattern: "[name]_[version]_[platform]_[arch]_[bundle][ext]"
           args: --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}

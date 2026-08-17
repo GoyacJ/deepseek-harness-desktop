@@ -55,14 +55,27 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web \
 
 安装用随包 Node 自带的 npm（开发回退则用系统 npm）执行 `npm install @deepseek-ai/dsh@<latest>`，写入 `{app_data}/runtimes/dsh/{version}/`。校验 `package.json` 版本和 `lib/bin.js` 后激活 sidecar 并重启。随包版本仍可从菜单恢复。只保留当前和上一份 sidecar。变更操作只走应用菜单；官方 Web UI 不能安装或切换。
 
-如果 npm latest 的 `engines.node` 超出随包 Node `22.23.2`，桌面端拒绝安装，需要先发带新 Node 的桌面版本。
+菜单 **插件** 只处理用户装进 web profile 的 npm 包。添加和删除调用官方 `dsh plugin --profile web add|remove <spec>`。停用把该包 bundle 的顶层 id 写成 `{dsh_home}/desktop.user-plugins.patch.yml` 的 `disabled: true`，启动时叠在 `desktop.generated.patch.yml` 后面。已停用名单在 `{app_data}/user-plugins.json`。不改用户的 `cordis.patch.yml`。市场页只读 [DSH Hub](https://dsh-hub.cc/search?lang=zh) 的 `scope=verified` 目录，安装仍用详情里的 `manifest.name`，不跟 Hub 的 `github:` 钉死方案，也不装 Hub 自己的 DSH 插件。发行包没有 pnpm 时，用随包 Node 的 corepack 在 `{app_data}/bin` 放下 shim。
+
+如果 npm latest 的 `engines.node` 超出随包 Node `22.23.2`，桌面端拒绝安装，提示先用菜单检查桌面更新。
 
 数据目录：
 
 - `{app_data}/runtimes/dsh/{version}/`：该版本的官方 `app` 树
 - `{app_data}/runtime-state.json`：当前版本、上一版本、来源（`sidecar` / `bundled`）
+- `{app_data}/bin/`：corepack 放下的 pnpm shim
+- `{app_data}/user-plugins.json`：用户插件停用名单
+- `{app_data}/dsh/desktop.user-plugins.patch.yml`：停用覆盖层
 
 检查和安装在后台线程做，不堵住正在跑的 DSH。启动页只读展示版本和更新阶段。
+
+## 桌面端更新
+
+检查和安装走 `tauri-plugin-updater`，读取 GitHub Releases 的 `latest.json`。签名用项目自己的 updater 密钥，不是 Apple Developer ID / Windows Authenticode。请求超时 12 秒。代理优先 `DSH_DESKTOP_UPDATE_PROXY` 和环境变量，否则自动读系统 HTTPS/HTTP 代理（macOS 用 `scutil --proxy`）。只开 SOCKS、或 VPN 只劫持浏览器时仍可能连不上。
+
+菜单在应用菜单：**检查桌面更新**、**安装并重启桌面更新**。和 DSH sidecar 更新共用 busy 锁与 toast，pending 分开。安装前先停 DSH 进程再替换安装包并重启。Linux 更新依赖 AppImage 产物。
+
+数据目录（sidecar、插件、会话）随 `identifier` 保留，桌面更新不会清掉用户 sidecar。
 
 ## 插件边界
 

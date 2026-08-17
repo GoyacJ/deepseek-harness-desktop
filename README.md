@@ -12,6 +12,12 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 
 ## 界面预览
 
+### 主界面
+
+官方 Web UI 由桌面壳托管。应用菜单可检查 npm `@deepseek-ai/dsh` 的 `latest`，进度显示在右下角 toast。
+
+![主界面](docs/screenshots/home.png)
+
 ### 对话与工具调用
 
 ![对话与工具调用](docs/screenshots/conversation.png)
@@ -31,6 +37,24 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web
 ### 插件列表
 
 ![插件列表](docs/screenshots/plugin-list.png)
+
+### 插件管理
+
+应用菜单 **插件** 打开独立管理窗口，可查看已安装包、启用 / 停用、删除，或按 npm 包名安装。变更后 DSH 会自动重启，进行中的会话会中断。
+
+![插件管理](docs/screenshots/plugin-manager.png)
+
+### 插件市场
+
+市场页读取 [dsh-hub.cc](https://dsh-hub.cc) 社区索引（`scope=verified`），支持搜索、分类与排序。目录来自社区，不是官方商店；安装前请确认来源可信。实际安装仍走官方 `dsh plugin add <npm-spec>`。
+
+![插件市场](docs/screenshots/plugin-market.png)
+
+### 安装插件
+
+添加插件时 toast 展示步骤：准备 pnpm → 安装插件 → 重启。
+
+![安装插件](docs/screenshots/plugin-install.png)
 
 ## 开发
 
@@ -54,16 +78,16 @@ npm run dev
 npm run build
 ```
 
-发行构建会下载并校验 Node.js 22.23.2，在独立目录安装锁定的官方 `@deepseek-ai/dsh@0.1.0-rc.6`，再将两者放入安装包。生成的运行时目录已被 Git 忽略。应用菜单可以检查 npm `@deepseek-ai/dsh` 的 `latest` 并安装到用户数据目录，不会改安装包。随包版本可随时恢复。
+发行构建会下载并校验 Node.js 22.23.2，在独立目录安装锁定的官方 `@deepseek-ai/dsh@0.1.0-rc.6`，再将两者放入安装包。生成的运行时目录已被 Git 忽略。应用菜单可以检查 npm `@deepseek-ai/dsh` 的 `latest` 并安装到用户数据目录，不会改安装包。随包版本可随时恢复。应用菜单也可以检查 GitHub Releases 上的桌面更新并安装重启。
 
 推送与应用版本一致的标签会触发 GitHub Actions：
 
 ```sh
-git tag v0.1.6
-git push origin v0.1.6
+git tag v0.1.7
+git push origin v0.1.7
 ```
 
-流水线发布 macOS Apple Silicon、macOS Intel、Windows x64 和 Linux x64 安装包。当前安装包没有商业代码签名，macOS Gatekeeper 和 Windows SmartScreen 可能显示未知开发者提示。
+流水线发布 macOS Apple Silicon、macOS Intel、Windows x64 和 Linux x64 安装包，并上传 updater 产物与 `latest.json`。应用内更新使用仓库 updater 密钥验签。当前安装包没有商业代码签名，macOS Gatekeeper 和 Windows SmartScreen 可能显示未知开发者提示。发布前需要配置 GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY`（可选 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）。
 
 可用于本地诊断的环境变量：
 
@@ -76,7 +100,8 @@ git push origin v0.1.6
 | `DSH_DESKTOP_DISABLE_PLUGIN` | 设为非空值时不加载桌面桥接插件 |
 | `DSH_DESKTOP_NPM` | 指定 `npm` 可执行文件路径 |
 | `DSH_DESKTOP_NPM_REGISTRY` | 覆盖 npm registry，仅使用该地址查询和安装 latest |
+| `DSH_DESKTOP_UPDATE_PROXY` | 覆盖桌面更新代理，例如 `http://127.0.0.1:7890`；未设时先看 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`，再自动读系统 HTTPS/HTTP 代理 |
 
-应用菜单 **DSH** 提供检查更新、安装并重启、恢复随包版本。官方 Web UI 不能触发这些操作。
+应用菜单可检查并安装桌面更新。**DSH** 提供检查 sidecar 更新、安装并重启、恢复随包版本。**插件** 提供插件管理（已安装 / 市场、npm 安装、启用停用、删除）。官方 Web UI 不能触发这些操作。
 
 架构与发行约束见 [docs/architecture.md](docs/architecture.md)。

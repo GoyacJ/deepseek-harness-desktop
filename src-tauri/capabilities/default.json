@@ -4,7 +4,8 @@
   "description": "Permissions for the bundled startup and failure page only.",
   "windows": [
     "main",
-    "update-toast"
+    "update-toast",
+    "plugin-manager"
   ],
   "permissions": [
     "core:default"

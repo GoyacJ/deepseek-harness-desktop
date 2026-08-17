@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "bundled": "0.1.0-rc.6",
+  "releases": [
+    {
+      "version": "0.1.0-rc.6",
+      "minDesktop": "0.1.5",
+      "node": "^22.19.0 || >=24.0.0",
+      "notes": "随安装包交付的版本。没有平台归档时，客户端只把它当作基线，不会下载。",
+      "archives": {}
+    },
+    {
+      "version": "0.1.0-rc.7",
+      "minDesktop": "0.1.5",
+      "node": "^22.19.0 || >=24.0.0",
+      "notes": "已验证的 sidecar 示例。",
+      "archives": {
+        "darwin-arm64": {
+          "url": "https://github.com/GoyacJ/deepseek-harness-desktop/releases/download/dsh-0.1.0-rc.7/dsh-0.1.0-rc.7-darwin-arm64.tar.gz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "darwin-x64": {
+          "url": "https://github.com/GoyacJ/deepseek-harness-desktop/releases/download/dsh-0.1.0-rc.7/dsh-0.1.0-rc.7-darwin-x64.tar.gz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "linux-x64": {
+          "url": "https://github.com/GoyacJ/deepseek-harness-desktop/releases/download/dsh-0.1.0-rc.7/dsh-0.1.0-rc.7-linux-x64.tar.gz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "win32-x64": {
+          "url": "https://github.com/GoyacJ/deepseek-harness-desktop/releases/download/dsh-0.1.0-rc.7/dsh-0.1.0-rc.7-win32-x64.tar.gz",
+          "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+        }
+      }
+    }
+  ]
+}

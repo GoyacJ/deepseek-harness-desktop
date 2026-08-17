@@ -14,6 +14,10 @@ const BUSY = new Set([
   'staging',
   'switching',
   'rolling_back',
+  'plugin_installing',
+  'plugin_removing',
+  'plugin_toggling',
+  'installing',
 ])
 
 const TITLES = {
@@ -23,9 +27,13 @@ const TITLES = {
   staging: '正在写入',
   switching: '正在切换',
   rolling_back: '正在回退',
+  plugin_installing: '正在添加插件',
+  plugin_removing: '正在删除插件',
+  plugin_toggling: '正在切换插件',
+  installing: '正在安装桌面更新',
   available: '发现新版本',
-  failed: '更新失败',
-  idle: 'DSH 更新',
+  failed: '失败',
+  idle: '更新',
 }
 
 let hideTimer = null
@@ -61,7 +69,12 @@ function render(snapshot) {
   const detail = currentDetail(steps)
   const doneCount = steps.filter((step) => step.status === 'done').length
 
-  title.textContent = TITLES[phase] || TITLES.idle
+  title.textContent =
+    phase === 'plugin_toggling'
+      ? (snapshot.update_message || '').includes('启用')
+        ? '正在启用插件'
+        : '正在停用插件'
+      : TITLES[phase] || TITLES.idle
   message.textContent = detail || snapshot.update_message || '正在准备。'
   toast.classList.toggle('failed', phase === 'failed')
   toast.classList.toggle('available', phase === 'available')
