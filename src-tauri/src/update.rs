@@ -4,6 +4,9 @@ use crate::runtime::{
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
+    env,
+    ffi::OsString,
     fs,
     io::{BufRead, BufReader},
     path::{Path, PathBuf},
@@ -13,7 +16,7 @@ use std::{
         mpsc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
@@ -28,6 +31,7 @@ const NPM_MIRROR_REGISTRY: &str = "https://registry.npmmirror.com";
 const JSON_FETCH_TIMEOUT: Duration = Duration::from_secs(8);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const DESKTOP_UPDATE_TIMEOUT: Duration = Duration::from_secs(12);
+const NPM_INSTALL_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -44,6 +48,7 @@ pub enum UpdatePhase {
     PluginInstalling,
     PluginRemoving,
     PluginToggling,
+    DshInstalling,
     Installing,
 }
 
@@ -101,6 +106,12 @@ struct NpmVersionDocument {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+struct NpmPackument {
+    #[serde(default)]
+    time: HashMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 struct NpmEngines {
     #[serde(default)]
     node: Option<String>,
@@ -112,12 +123,14 @@ struct NpmLatest {
     registry: String,
     node: Option<String>,
     source: String,
+    published_at: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectedRelease {
     pub version: String,
     pub registry: String,
+    pub published_at: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -293,6 +306,7 @@ fn select_npm_update(
     UpdateCheck::Available(SelectedRelease {
         version: latest.version.clone(),
         registry: latest.registry.clone(),
+        published_at: latest.published_at.clone(),
     })
 }
 
@@ -515,7 +529,7 @@ fn apply_pending_update(app: &AppHandle, selected: SelectedRelease) {
     report(
         app,
         &controller,
-        UpdatePhase::Downloading,
+        UpdatePhase::DshInstalling,
         format!("正在从 npm 安装 DSH {}。", selected.version),
         Some(selected.version.clone()),
         &steps,
@@ -534,7 +548,7 @@ fn apply_pending_update(app: &AppHandle, selected: SelectedRelease) {
             report(
                 app,
                 &controller,
-                UpdatePhase::Downloading,
+                UpdatePhase::DshInstalling,
                 format!("正在从 npm 安装 DSH {}。", selected.version),
                 Some(selected.version.clone()),
                 &steps,
@@ -1114,6 +1128,8 @@ fn npm_install_dsh(
     command.args([
         "install",
         spec.as_str(),
+        "--before",
+        selected.published_at.as_str(),
         "--omit=dev",
         "--no-audit",
         "--no-fund",
@@ -1130,6 +1146,14 @@ fn npm_install_dsh(
         .env("NO_UPDATE_NOTIFIER", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(path) = npm_path_env(&npm.program) {
+        command.env("PATH", path);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let mut child = command
         .spawn()
@@ -1141,13 +1165,30 @@ fn npm_install_dsh(
         spawn_pipe_reader(stdout, tx.clone()),
         spawn_pipe_reader(stderr, tx),
     ];
-    while let Ok(line) = rx.recv() {
-        if !line.is_empty() {
-            on_line(line);
+    let started = Instant::now();
+    let timed_out = loop {
+        if started.elapsed() >= NPM_INSTALL_TIMEOUT {
+            terminate_npm_process(&mut child);
+            break true;
         }
-    }
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(line) => {
+                if !line.is_empty() {
+                    on_line(line);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break false,
+        }
+    };
     for reader in readers.into_iter().flatten() {
         let _ = reader.join();
+    }
+    if timed_out {
+        return Err(format!(
+            "npm 安装超过 {} 分钟，已停止。请检查网络后重试。",
+            NPM_INSTALL_TIMEOUT.as_secs() / 60
+        ));
     }
     let status = child
         .wait()
@@ -1156,6 +1197,35 @@ fn npm_install_dsh(
         return Err(format!("npm 安装 {spec} 失败：{status}"));
     }
     Ok(())
+}
+
+fn npm_path_env(program: &Path) -> Option<OsString> {
+    let directory = program.parent()?.to_path_buf();
+    if directory.as_os_str().is_empty() {
+        return None;
+    }
+    let mut directories = vec![directory];
+    if let Some(current) = env::var_os("PATH") {
+        directories.extend(env::split_paths(&current));
+    }
+    env::join_paths(directories).ok()
+}
+
+fn terminate_npm_process(child: &mut std::process::Child) {
+    let pid = child.id();
+    #[cfg(unix)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    #[cfg(windows)]
+    {
+        let pid = pid.to_string();
+        let _ = Command::new("taskkill")
+            .args(["/PID", pid.as_str(), "/T", "/F"])
+            .status();
+    }
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn spawn_pipe_reader(
@@ -1182,12 +1252,22 @@ fn fetch_npm_latest(mut on_attempt: impl FnMut(String)) -> Result<NpmLatest, Str
         match fetch_text(&url, JSON_FETCH_TIMEOUT) {
             Ok(body) => match serde_json::from_str::<NpmVersionDocument>(&body) {
                 Ok(document) if !document.version.is_empty() => {
+                    let registry = registry_origin(&url);
+                    let published_at = match fetch_npm_publish_time(&registry, &document.version) {
+                        Ok(published_at) => published_at,
+                        Err(error) => {
+                            last_error = format!("{name} {error}");
+                            on_attempt(last_error.clone());
+                            continue;
+                        }
+                    };
                     on_attempt(format!("{name} 已获取 {}", document.version));
                     return Ok(NpmLatest {
                         version: document.version,
-                        registry: registry_origin(&url),
+                        registry,
                         node: document.engines.node,
                         source: name.to_string(),
+                        published_at,
                     });
                 }
                 Ok(_) => {
@@ -1206,6 +1286,24 @@ fn fetch_npm_latest(mut on_attempt: impl FnMut(String)) -> Result<NpmLatest, Str
         }
     }
     Err(last_error)
+}
+
+fn fetch_npm_publish_time(registry: &str, version: &str) -> Result<String, String> {
+    let url = format!("{registry}/{OFFICIAL_DSH_NAME}");
+    let body = fetch_text(&url, JSON_FETCH_TIMEOUT)
+        .map_err(|error| format!("无法读取 DSH 发布时间：{}", classify_fetch_error(&error)))?;
+    npm_publish_time_from(&body, version)
+}
+
+fn npm_publish_time_from(body: &str, version: &str) -> Result<String, String> {
+    let document: NpmPackument =
+        serde_json::from_str(body).map_err(|_| "DSH 发布时间内容无法解析".to_string())?;
+    document
+        .time
+        .get(version)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| format!("DSH {version} 缺少发布时间"))
 }
 
 fn fetch_text(url: &str, timeout: Duration) -> Result<String, String> {
@@ -1456,6 +1554,7 @@ fn toast_is_busy(snapshot: &crate::runtime::RuntimeSnapshot) -> bool {
             | UpdatePhase::PluginInstalling
             | UpdatePhase::PluginRemoving
             | UpdatePhase::PluginToggling
+            | UpdatePhase::DshInstalling
             | UpdatePhase::Installing
     )
 }
@@ -1562,6 +1661,7 @@ mod tests {
             registry: DEFAULT_NPM_REGISTRY.into(),
             node: node.map(str::to_string),
             source: "npm".into(),
+            published_at: "2026-08-17T11:50:59.194Z".into(),
         }
     }
 
@@ -1660,6 +1760,7 @@ mod tests {
             UpdateCheck::Available(selected) => {
                 assert_eq!(selected.version, "0.1.0-rc.7");
                 assert_eq!(selected.registry, DEFAULT_NPM_REGISTRY);
+                assert_eq!(selected.published_at, "2026-08-17T11:50:59.194Z");
             }
             other => panic!("unexpected {other:?}"),
         }
@@ -1675,6 +1776,31 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn npm_publish_time_selects_the_exact_release() {
+        let body = r#"{
+            "time": {
+                "0.1.0-rc.7": "2026-08-17T11:50:59.194Z",
+                "0.1.0-rc.8": "2026-08-19T15:41:29.655Z"
+            }
+        }"#;
+        assert_eq!(
+            npm_publish_time_from(body, "0.1.0-rc.7").unwrap(),
+            "2026-08-17T11:50:59.194Z"
+        );
+        assert!(npm_publish_time_from(body, "0.1.0-rc.6").is_err());
+    }
+
+    #[test]
+    fn npm_path_starts_with_the_bundled_node_directory() {
+        let node = Path::new("/Applications/dsh-dk.app/Contents/Resources/node/bin/node");
+        let path = npm_path_env(node).unwrap();
+        assert_eq!(
+            env::split_paths(&path).next().unwrap(),
+            node.parent().unwrap()
+        );
     }
 
     #[test]
