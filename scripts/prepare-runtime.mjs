@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, chmod, copyFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, readFile, readdir, rm, chmod, copyFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
@@ -18,18 +18,22 @@ const targets = {
   "darwin-arm64": {
     archive: `node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
     executable: ["bin", "node"],
+    npm: ["lib", "node_modules", "npm"],
   },
   "darwin-x64": {
     archive: `node-v${NODE_VERSION}-darwin-x64.tar.gz`,
     executable: ["bin", "node"],
+    npm: ["lib", "node_modules", "npm"],
   },
   "linux-x64": {
     archive: `node-v${NODE_VERSION}-linux-x64.tar.xz`,
     executable: ["bin", "node"],
+    npm: ["lib", "node_modules", "npm"],
   },
   "win32-x64": {
     archive: `node-v${NODE_VERSION}-win-x64.zip`,
     executable: ["node.exe"],
+    npm: ["node_modules", "npm"],
   },
 };
 
@@ -115,6 +119,10 @@ async function installNode() {
       : path.join(nodeRoot, "bin", "node");
   await mkdir(path.dirname(destination), { recursive: true });
   await copyFile(path.join(unpackedRoot, ...target.executable), destination);
+  const npmDestination = path.join(nodeRoot, ...target.npm);
+  await mkdir(path.dirname(npmDestination), { recursive: true });
+  await cp(path.join(unpackedRoot, ...target.npm), npmDestination, { recursive: true });
+  await readFile(path.join(npmDestination, "bin", "npm-cli.js"));
   await copyFile(path.join(unpackedRoot, "LICENSE"), path.join(nodeRoot, "LICENSE"));
   if (process.platform !== "win32") {
     await chmod(destination, 0o755);

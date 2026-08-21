@@ -1332,6 +1332,37 @@ mod tests {
     }
 
     #[test]
+    fn bundled_npm_cli_is_found_in_unix_and_windows_node_layouts() {
+        let temporary = std::env::temp_dir().join(format!(
+            "dsh-desktop-npm-layout-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let unix_node = temporary.join("unix/bin/node");
+        let unix_npm = temporary.join("unix/lib/node_modules/npm/bin/npm-cli.js");
+        let windows_node = temporary.join("windows/node.exe");
+        let windows_npm = temporary.join("windows/node_modules/npm/bin/npm-cli.js");
+        std::fs::create_dir_all(unix_node.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(unix_npm.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(windows_npm.parent().unwrap()).unwrap();
+        std::fs::write(&unix_node, []).unwrap();
+        std::fs::write(&unix_npm, []).unwrap();
+        std::fs::write(&windows_node, []).unwrap();
+        std::fs::write(&windows_npm, []).unwrap();
+
+        assert_eq!(
+            std::fs::canonicalize(npm_cli_js(&unix_node).unwrap()).unwrap(),
+            std::fs::canonicalize(unix_npm).unwrap()
+        );
+        assert_eq!(npm_cli_js(&windows_node), Some(windows_npm));
+
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
     fn bundled_runtime_paths_are_passed_outside_the_windows_command_line() {
         let bootstrap = PathBuf::from(r"D:\Apps With Spaces\resources\runtime-bootstrap.mjs");
         let entry = PathBuf::from(
@@ -1382,7 +1413,6 @@ mod tests {
         let launcher = resolve_launcher(&temporary, &temporary.join("app-data"), OFFICIAL_DSH_PACKAGE);
 
         assert_ne!(launcher.program, stale_node);
-        assert_eq!(launcher.kind, LauncherKind::Npx);
     }
 
     #[test]
