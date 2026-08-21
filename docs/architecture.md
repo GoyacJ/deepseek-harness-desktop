@@ -53,7 +53,7 @@ npx --yes @deepseek-ai/dsh@0.1.0-rc.6 web \
 
 检查更新读取 `https://registry.npmjs.org/@deepseek-ai/dsh/latest`，连不上再试 npmmirror。不跟 GitHub 兼容列表。可用 `DSH_DESKTOP_NPM_REGISTRY` 覆盖 registry。
 
-安装用随包 Node 自带的 npm（开发回退则用系统 npm）执行 `npm install @deepseek-ai/dsh@<latest>`，写入 `{app_data}/runtimes/dsh/{version}/`。校验 `package.json` 版本和 `lib/bin.js` 后激活 sidecar 并重启。随包版本仍可从菜单恢复。只保留当前和上一份 sidecar。变更操作只走应用菜单；官方 Web UI 不能安装或切换。
+安装用随包 Node 自带的 npm（开发回退则用系统 npm）执行 `npm install @deepseek-ai/dsh@<latest>`，并用该版本的 npm 发布时间作为 `--before` 快照，防止宽松依赖范围混入后续预发布子包。npm 子进程 PATH 包含随包 Node，安装超过 20 分钟会终止整个子进程树。安装结果写入 `{app_data}/runtimes/dsh/{version}/`。校验 `package.json` 版本和 `lib/bin.js` 后激活 sidecar 并重启。随包版本仍可从菜单恢复。只保留当前和上一份 sidecar。变更操作只走应用菜单；官方 Web UI 不能安装或切换。
 
 菜单 **插件** 只处理用户装进 web profile 的 npm 包。添加和删除调用官方 `dsh plugin --profile web add|remove <spec>`。停用把该包 bundle 的顶层 id 写成 `{dsh_home}/desktop.user-plugins.patch.yml` 的 `disabled: true`，启动时叠在 `desktop.generated.patch.yml` 后面。已停用名单在 `{app_data}/user-plugins.json`。不改用户的 `cordis.patch.yml`。市场页只读 [DSH Hub](https://dsh-hub.cc/search?lang=zh) 的 `scope=verified` 目录，安装仍用详情里的 `manifest.name`，不跟 Hub 的 `github:` 钉死方案，也不装 Hub 自己的 DSH 插件。发行包没有 pnpm 时，用随包 Node 的 corepack 在 `{app_data}/bin` 放下 shim。
 

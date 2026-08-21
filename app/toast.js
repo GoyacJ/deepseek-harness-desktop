@@ -17,6 +17,7 @@ const BUSY = new Set([
   'plugin_installing',
   'plugin_removing',
   'plugin_toggling',
+  'dsh_installing',
   'installing',
 ])
 
@@ -30,6 +31,7 @@ const TITLES = {
   plugin_installing: '正在添加插件',
   plugin_removing: '正在删除插件',
   plugin_toggling: '正在切换插件',
+  dsh_installing: '正在安装 DSH',
   installing: '正在安装桌面更新',
   available: '发现新版本',
   failed: '失败',
